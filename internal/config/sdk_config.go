@@ -29,6 +29,22 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// UpstreamTimeouts configures timeouts for upstream HTTP requests to provider APIs.
+	UpstreamTimeouts UpstreamTimeouts `yaml:"upstream-timeouts" json:"upstream-timeouts"`
+}
+
+// UpstreamTimeouts holds upstream HTTP request timeout configuration.
+// These timeouts apply to all provider executors using newProxyAwareHTTPClient() or getKiroPooledHTTPClient().
+type UpstreamTimeouts struct {
+	// ConnectTimeoutSeconds is the timeout for establishing TCP connection and TLS handshake.
+	// 0 means use Go default (no explicit timeout). Negative values are invalid.
+	ConnectTimeoutSeconds int `yaml:"connect-timeout-seconds" json:"connect-timeout-seconds"`
+
+	// ResponseHeaderTimeoutSeconds is the timeout for waiting for response headers after sending the request.
+	// This is the key timeout for preventing requests from hanging for minutes when upstream is unresponsive.
+	// 0 means use Go default (no explicit timeout). Negative values are invalid.
+	ResponseHeaderTimeoutSeconds int `yaml:"response-header-timeout-seconds" json:"response-header-timeout-seconds"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
@@ -103,4 +119,50 @@ func MakeInlineAPIKeyProvider(keys []string) *AccessProvider {
 		APIKeys: append([]string(nil), keys...),
 	}
 	return provider
+}
+
+// Default upstream timeout values (in seconds)
+const (
+	DefaultConnectTimeoutSeconds        = 10
+	DefaultResponseHeaderTimeoutSeconds = 30
+)
+
+// GetUpstreamTimeouts returns the upstream timeout configuration with defaults applied.
+// If cfg is nil or timeout values are 0, default values are used.
+// Returns an error if any timeout value is negative.
+func GetUpstreamTimeouts(cfg *SDKConfig) (connectTimeout, responseHeaderTimeout int, err error) {
+	connectTimeout = DefaultConnectTimeoutSeconds
+	responseHeaderTimeout = DefaultResponseHeaderTimeoutSeconds
+
+	if cfg == nil {
+		return connectTimeout, responseHeaderTimeout, nil
+	}
+
+	// Validate and apply connect timeout
+	if cfg.UpstreamTimeouts.ConnectTimeoutSeconds < 0 {
+		return 0, 0, &InvalidTimeoutError{Field: "connect-timeout-seconds", Value: cfg.UpstreamTimeouts.ConnectTimeoutSeconds}
+	}
+	if cfg.UpstreamTimeouts.ConnectTimeoutSeconds > 0 {
+		connectTimeout = cfg.UpstreamTimeouts.ConnectTimeoutSeconds
+	}
+
+	// Validate and apply response header timeout
+	if cfg.UpstreamTimeouts.ResponseHeaderTimeoutSeconds < 0 {
+		return 0, 0, &InvalidTimeoutError{Field: "response-header-timeout-seconds", Value: cfg.UpstreamTimeouts.ResponseHeaderTimeoutSeconds}
+	}
+	if cfg.UpstreamTimeouts.ResponseHeaderTimeoutSeconds > 0 {
+		responseHeaderTimeout = cfg.UpstreamTimeouts.ResponseHeaderTimeoutSeconds
+	}
+
+	return connectTimeout, responseHeaderTimeout, nil
+}
+
+// InvalidTimeoutError is returned when a timeout configuration value is invalid.
+type InvalidTimeoutError struct {
+	Field string
+	Value int
+}
+
+func (e *InvalidTimeoutError) Error() string {
+	return "invalid timeout value for " + e.Field + ": negative values are not allowed"
 }

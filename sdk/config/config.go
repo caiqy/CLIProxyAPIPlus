@@ -13,6 +13,8 @@ type AccessProvider = internalconfig.AccessProvider
 type Config = internalconfig.Config
 
 type StreamingConfig = internalconfig.StreamingConfig
+type UpstreamTimeouts = internalconfig.UpstreamTimeouts
+type InvalidTimeoutError = internalconfig.InvalidTimeoutError
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
 type AmpCode = internalconfig.AmpCode
@@ -33,9 +35,11 @@ type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 type TLS = internalconfig.TLSConfig
 
 const (
-	AccessProviderTypeConfigAPIKey = internalconfig.AccessProviderTypeConfigAPIKey
-	DefaultAccessProviderName      = internalconfig.DefaultAccessProviderName
-	DefaultPanelGitHubRepository   = internalconfig.DefaultPanelGitHubRepository
+	AccessProviderTypeConfigAPIKey      = internalconfig.AccessProviderTypeConfigAPIKey
+	DefaultAccessProviderName           = internalconfig.DefaultAccessProviderName
+	DefaultPanelGitHubRepository        = internalconfig.DefaultPanelGitHubRepository
+	DefaultConnectTimeoutSeconds        = internalconfig.DefaultConnectTimeoutSeconds
+	DefaultResponseHeaderTimeoutSeconds = internalconfig.DefaultResponseHeaderTimeoutSeconds
 )
 
 func MakeInlineAPIKeyProvider(keys []string) *AccessProvider {
@@ -58,4 +62,9 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 
 func NormalizeCommentIndentation(data []byte) []byte {
 	return internalconfig.NormalizeCommentIndentation(data)
+}
+
+// GetUpstreamTimeouts returns the upstream timeout configuration with defaults applied.
+func GetUpstreamTimeouts(cfg *SDKConfig) (connectTimeout, responseHeaderTimeout int, err error) {
+	return internalconfig.GetUpstreamTimeouts(cfg)
 }
