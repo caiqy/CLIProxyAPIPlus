@@ -104,13 +104,13 @@ func getGlobalFingerprintManager() *kiroauth.FingerprintManager {
 // retryConfig holds configuration for socket retry logic.
 // Based on kiro2Api Python implementation patterns.
 type retryConfig struct {
-	MaxRetries       int           // Maximum number of retry attempts
-	BaseDelay        time.Duration // Base delay between retries (exponential backoff)
-	MaxDelay         time.Duration // Maximum delay cap
-	RetryableErrors  []string      // List of retryable error patterns
-	RetryableStatus  map[int]bool  // HTTP status codes to retry
-	FirstTokenTmout  time.Duration // Timeout for first token in streaming
-	StreamReadTmout  time.Duration // Timeout between stream chunks
+	MaxRetries      int           // Maximum number of retry attempts
+	BaseDelay       time.Duration // Base delay between retries (exponential backoff)
+	MaxDelay        time.Duration // Maximum delay cap
+	RetryableErrors []string      // List of retryable error patterns
+	RetryableStatus map[int]bool  // HTTP status codes to retry
+	FirstTokenTmout time.Duration // Timeout for first token in streaming
+	StreamReadTmout time.Duration // Timeout between stream chunks
 }
 
 // defaultRetryConfig returns the default retry configuration for Kiro socket operations.
@@ -243,45 +243,63 @@ var (
 
 // getKiroPooledHTTPClient returns a shared HTTP client with optimized connection pooling.
 // The client is lazily initialized on first use and reused across requests.
+// It reads timeout configuration from the provided config.
 // This is especially beneficial for:
 // - Reducing TCP handshake overhead
 // - Enabling HTTP/2 multiplexing
 // - Better handling of keep-alive connections
-func getKiroPooledHTTPClient() *http.Client {
+//
+// Parameters:
+//   - cfg: The application configuration (includes upstream timeout settings)
+func getKiroPooledHTTPClient(cfg *config.Config) *http.Client {
 	kiroHTTPClientPoolOnce.Do(func() {
-		transport := &http.Transport{
-			// Connection pool settings
-			MaxIdleConns:        100,              // Max idle connections across all hosts
-			MaxIdleConnsPerHost: 20,               // Max idle connections per host
-			MaxConnsPerHost:     50,               // Max total connections per host
-			IdleConnTimeout:     90 * time.Second, // How long idle connections stay in pool
-
-			// Timeouts for connection establishment
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second, // TCP connection timeout
-				KeepAlive: 30 * time.Second, // TCP keep-alive interval
-			}).DialContext,
-
-			// TLS handshake timeout
-			TLSHandshakeTimeout: 10 * time.Second,
-
-			// Response header timeout
-			ResponseHeaderTimeout: 30 * time.Second,
-
-			// Expect 100-continue timeout
-			ExpectContinueTimeout: 1 * time.Second,
-
-			// Enable HTTP/2 when available
-			ForceAttemptHTTP2: true,
+		// Get upstream timeout configuration from global config
+		var sdkCfg *config.SDKConfig
+		if cfg != nil {
+			sdkCfg = &cfg.SDKConfig
 		}
+		connectTimeoutSec, responseHeaderTimeoutSec, err := config.GetUpstreamTimeouts(sdkCfg)
+		if err != nil {
+			// Negative timeout values are invalid - log error and use defaults
+			log.Errorf("kiro: invalid upstream timeout configuration: %v, using defaults", err)
+			connectTimeoutSec = config.DefaultConnectTimeoutSeconds
+			responseHeaderTimeoutSec = config.DefaultResponseHeaderTimeoutSeconds
+		}
+
+		connectTimeout := time.Duration(connectTimeoutSec) * time.Second
+		responseHeaderTimeout := time.Duration(responseHeaderTimeoutSec) * time.Second
+
+		// Clone DefaultTransport to preserve reasonable defaults
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+
+		// Override connection pool settings for Kiro
+		transport.MaxIdleConns = 100                 // Max idle connections across all hosts
+		transport.MaxIdleConnsPerHost = 20           // Max idle connections per host
+		transport.MaxConnsPerHost = 50               // Max total connections per host
+		transport.IdleConnTimeout = 90 * time.Second // How long idle connections stay in pool
+
+		// Apply connect timeout from config
+		transport.DialContext = (&net.Dialer{
+			Timeout:   connectTimeout,
+			KeepAlive: 30 * time.Second, // TCP keep-alive interval
+		}).DialContext
+
+		// Apply response header timeout from config
+		transport.ResponseHeaderTimeout = responseHeaderTimeout
+
+		// Expect 100-continue timeout
+		transport.ExpectContinueTimeout = 1 * time.Second
+
+		// Enable HTTP/2 when available
+		transport.ForceAttemptHTTP2 = true
 
 		kiroHTTPClientPool = &http.Client{
 			Transport: transport,
 			// No global timeout - let individual requests set their own timeouts via context
 		}
 
-		log.Debugf("kiro: initialized pooled HTTP client (MaxIdleConns=%d, MaxIdleConnsPerHost=%d, MaxConnsPerHost=%d)",
-			transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxConnsPerHost)
+		log.Debugf("kiro: initialized pooled HTTP client (connect=%v, response-header=%v, MaxIdleConns=%d, MaxIdleConnsPerHost=%d, MaxConnsPerHost=%d)",
+			connectTimeout, responseHeaderTimeout, transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxConnsPerHost)
 	})
 
 	return kiroHTTPClientPool
@@ -307,7 +325,7 @@ func newKiroHTTPClientWithPooling(ctx context.Context, cfg *config.Config, auth 
 	}
 
 	// No proxy - use pooled client for better performance
-	pooledClient := getKiroPooledHTTPClient()
+	pooledClient := getKiroPooledHTTPClient(cfg)
 
 	// If timeout is specified, we need to wrap the pooled transport with timeout
 	if timeout > 0 {
@@ -482,12 +500,12 @@ func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
 		// Get token-specific fingerprint for dynamic UA generation
 		tokenKey := getTokenKey(auth)
 		fp := getGlobalFingerprintManager().GetFingerprint(tokenKey)
-		
+
 		// Use fingerprint-generated dynamic User-Agent
 		req.Header.Set("User-Agent", fp.BuildUserAgent())
 		req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
 		req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
-		
+
 		log.Debugf("kiro: using dynamic fingerprint for token %s (SDK:%s, OS:%s/%s, Kiro:%s)",
 			tokenKey[:8]+"...", fp.SDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 	} else {
@@ -506,10 +524,10 @@ func (e *KiroExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 	if strings.TrimSpace(accessToken) == "" {
 		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
-	
+
 	// Apply dynamic fingerprint-based headers
 	applyDynamicFingerprint(req, auth)
-	
+
 	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 	req.Header.Set("Authorization", "Bearer "+accessToken)
@@ -670,7 +688,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 			// Apply dynamic fingerprint-based headers
 			applyDynamicFingerprint(httpReq, auth)
-			
+
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 
@@ -1079,7 +1097,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 			// Apply dynamic fingerprint-based headers
 			applyDynamicFingerprint(httpReq, auth)
-			
+
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 
