@@ -27,6 +27,15 @@ func ConvertCodexResponseToOpenAIResponses(ctx context.Context, modelName string
 		out := fmt.Sprintf("data: %s", string(rawJSON))
 		return []string{out}
 	}
+
+	// 检查是否是错误 JSON，如果是则转换为 OpenAI Responses API 格式
+	// 格式: {"type":"error","error":{...},"sequence_number":0}
+	if errorResult := gjson.GetBytes(rawJSON, "error"); errorResult.Exists() {
+		errorEvent := `{"type":"error","sequence_number":0}`
+		errorEvent, _ = sjson.SetRaw(errorEvent, "error", errorResult.Raw)
+		return []string{fmt.Sprintf("data: %s", errorEvent)}
+	}
+
 	return []string{string(rawJSON)}
 }
 
