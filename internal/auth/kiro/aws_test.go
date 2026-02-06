@@ -3,6 +3,8 @@ package kiro
 import (
 	"encoding/base64"
 	"encoding/json"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -303,6 +305,19 @@ func TestGenerateTokenFileName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := GenerateTokenFileName(tt.tokenData)
+			if tt.tokenData != nil && tt.tokenData.Email == "" {
+				base := strings.TrimSuffix(tt.expected, ".json")
+				if base == tt.expected {
+					t.Fatalf("expected filename to end with .json, got %q", tt.expected)
+				}
+
+				pattern := "^" + regexp.QuoteMeta(base) + "-\\d{5}\\.json$"
+				if !regexp.MustCompile(pattern).MatchString(result) {
+					t.Errorf("GenerateTokenFileName() = %q, want match %q", result, pattern)
+				}
+				return
+			}
+
 			if result != tt.expected {
 				t.Errorf("GenerateTokenFileName() = %q, want %q", result, tt.expected)
 			}
