@@ -1699,6 +1699,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	modelMap := map[string]string{
 		// Amazon Q format (amazonq- prefix) - same API as Kiro
 		"amazonq-auto":                       "auto",
+		"amazonq-claude-opus-4-6":            "claude-opus-4.6",
 		"amazonq-claude-opus-4-5":            "claude-opus-4.5",
 		"amazonq-claude-sonnet-4-5":          "claude-sonnet-4.5",
 		"amazonq-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
@@ -1706,6 +1707,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
 		"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
 		// Kiro format (kiro- prefix) - valid model names that should be preserved
+		"kiro-claude-opus-4-6":            "claude-opus-4.6",
 		"kiro-claude-opus-4-5":            "claude-opus-4.5",
 		"kiro-claude-sonnet-4-5":          "claude-sonnet-4.5",
 		"kiro-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
@@ -1714,6 +1716,8 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
 		"kiro-auto":                       "auto",
 		// Native format (no prefix) - used by Kiro IDE directly
+		"claude-opus-4-6":            "claude-opus-4.6",
+		"claude-opus-4.6":            "claude-opus-4.6",
 		"claude-opus-4-5":            "claude-opus-4.5",
 		"claude-opus-4.5":            "claude-opus-4.5",
 		"claude-haiku-4-5":           "claude-haiku-4.5",
@@ -1725,10 +1729,12 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"claude-sonnet-4-20250514":   "claude-sonnet-4",
 		"auto":                       "auto",
 		// Agentic variants (same backend model IDs, but with special system prompt)
+		"claude-opus-4.6-agentic":        "claude-opus-4.6",
 		"claude-opus-4.5-agentic":        "claude-opus-4.5",
 		"claude-sonnet-4.5-agentic":      "claude-sonnet-4.5",
 		"claude-sonnet-4-agentic":        "claude-sonnet-4",
 		"claude-haiku-4.5-agentic":       "claude-haiku-4.5",
+		"kiro-claude-opus-4-6-agentic":   "claude-opus-4.6",
 		"kiro-claude-opus-4-5-agentic":   "claude-opus-4.5",
 		"kiro-claude-sonnet-4-5-agentic": "claude-sonnet-4.5",
 		"kiro-claude-sonnet-4-agentic":   "claude-sonnet-4",
@@ -2461,6 +2467,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
 	var hasToolUses bool          // Track if any tool uses were emitted
+	var hasTruncatedTools bool    // Track if any tool uses were truncated
 	var upstreamStopReason string // Track stop_reason from upstream events
 
 	// Tool use state tracking for input buffering and deduplication
@@ -3239,40 +3246,16 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			_ = signature // Signature can be used for verification if needed
 
 		case "toolUseEvent":
-			// Debug: log raw toolUseEvent payload for large tool inputs
-			if log.IsLevelEnabled(log.DebugLevel) {
-				payloadStr := string(payload)
-				if len(payloadStr) > 500 {
-					payloadStr = payloadStr[:500] + "...[truncated]"
-				}
-				log.Debugf("kiro: raw toolUseEvent payload (%d bytes): %s", len(payload), payloadStr)
-			}
 			// Handle dedicated tool use events with input buffering
 			completedToolUses, newState := kiroclaude.ProcessToolUseEvent(event, currentToolUse, processedIDs)
 			currentToolUse = newState
 
 			// Emit completed tool uses
 			for _, tu := range completedToolUses {
-				// Check for truncated write marker - emit as a Bash tool that echoes the error
-				// This way Claude Code will execute it, see the error, and the agent can retry
-				if tu.Name == "__truncated_write__" {
-					filePath := ""
-					if fp, ok := tu.Input["file_path"].(string); ok && fp != "" {
-						filePath = fp
-					}
-
-					// Create a Bash tool that echoes the error message
-					// This will be executed by Claude Code and the agent will see the result
-					var errorMsg string
-					if filePath != "" {
-						errorMsg = fmt.Sprintf("echo '[WRITE TOOL ERROR] The file content for \"%s\" is too large to be transmitted by the upstream API. You MUST retry by writing the file in smaller chunks: First use Write to create the file with the first 700 lines, then use multiple Edit operations to append the remaining content in chunks of ~700 lines each.'", filePath)
-					} else {
-						errorMsg = "echo '[WRITE TOOL ERROR] The file content is too large to be transmitted by the upstream API. The Write tool input was truncated. You MUST retry by writing the file in smaller chunks: First use Write to create the file with the first 700 lines, then use multiple Edit operations to append the remaining content in chunks of ~700 lines each.'"
-					}
-
-					log.Warnf("kiro: converting truncated write to Bash echo for file: %s", filePath)
-
-					hasToolUses = true
+				// Check if this tool was truncated - emit with SOFT_LIMIT_REACHED marker
+				if tu.IsTruncated {
+					hasTruncatedTools = true
+					log.Infof("kiro: streamToChannel emitting truncated tool with SOFT_LIMIT_REACHED: %s (ID: %s)", tu.Name, tu.ToolUseID)
 
 					// Close text block if open
 					if isTextBlockOpen && contentBlockIndex >= 0 {
@@ -3288,8 +3271,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 					contentBlockIndex++
 
-					// Emit as Bash tool_use
-					blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, "Bash")
+					// Emit tool_use with SOFT_LIMIT_REACHED marker input
+					blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, tu.Name)
 					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 					for _, chunk := range sseData {
 						if chunk != "" {
@@ -3297,16 +3280,14 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 						}
 					}
 
-					// Emit the Bash command as input
-					bashInput := map[string]interface{}{
-						"command": errorMsg,
+					// Build SOFT_LIMIT_REACHED marker input
+					markerInput := map[string]interface{}{
+						"_status":  "SOFT_LIMIT_REACHED",
+						"_message": "Tool output was truncated. Split content into smaller chunks (max 300 lines). Due to potential model hallucination, you MUST re-fetch the current working directory and generate the correct file_path.",
 					}
-					inputJSON, err := json.Marshal(bashInput)
-					if err != nil {
-						log.Errorf("kiro: failed to marshal bash input for truncated write error: %v", err)
-						continue
-					}
-					inputDelta := kiroclaude.BuildClaudeInputJsonDeltaEvent(string(inputJSON), contentBlockIndex)
+
+					markerJSON, _ := json.Marshal(markerInput)
+					inputDelta := kiroclaude.BuildClaudeInputJsonDeltaEvent(string(markerJSON), contentBlockIndex)
 					sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, inputDelta, &translatorParam)
 					for _, chunk := range sseData {
 						if chunk != "" {
@@ -3314,6 +3295,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 						}
 					}
 
+					// Close tool_use block
 					blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
 					sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 					for _, chunk := range sseData {
@@ -3322,7 +3304,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 						}
 					}
 
-					continue // Skip the normal tool_use emission
+					hasToolUses = true // Keep this so stop_reason = tool_use
+					continue
 				}
 
 				hasToolUses = true
@@ -3623,7 +3606,12 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 
 	// Determine stop reason: prefer upstream, then detect tool_use, default to end_turn
+	// SOFT_LIMIT_REACHED: Keep stop_reason = "tool_use" so Claude continues the loop
 	stopReason := upstreamStopReason
+	if hasTruncatedTools {
+		// Log that we're using SOFT_LIMIT_REACHED approach
+		log.Infof("kiro: streamToChannel using SOFT_LIMIT_REACHED - keeping stop_reason=tool_use for truncated tools")
+	}
 	if stopReason == "" {
 		if hasToolUses {
 			stopReason = "tool_use"
