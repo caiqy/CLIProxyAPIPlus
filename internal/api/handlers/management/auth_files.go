@@ -51,6 +51,7 @@ const (
 	anthropicCallbackPort   = 54545
 	geminiCallbackPort      = 8085
 	codexCallbackPort       = 1455
+	oauthWaitTimeout        = 30 * time.Minute
 	geminiCLIEndpoint       = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion        = "v1internal"
 	geminiCLIUserAgent      = "google-api-nodejs-client/9.15.1"
@@ -954,7 +955,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		fmt.Println("Waiting for authentication callback...")
 		// Wait up to 5 minutes
-		resultMap, errWait := waitForFile(waitFile, 5*time.Minute)
+		resultMap, errWait := waitForFile(waitFile, oauthWaitTimeout)
 		if errWait != nil {
 			if errors.Is(errWait, errOAuthSessionNotPending) {
 				return
@@ -1067,7 +1068,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		// Wait for callback file written by server route
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-gemini-%s.oauth", state))
 		fmt.Println("Waiting for authentication callback...")
-		deadline := time.Now().Add(5 * time.Minute)
+		deadline := time.Now().Add(oauthWaitTimeout)
 		var authCode string
 		for {
 			if !IsOAuthSessionPending(state, "gemini") {
@@ -1333,7 +1334,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		// Wait for callback file
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
+		deadline := time.Now().Add(oauthWaitTimeout)
 		var code string
 		for {
 			if !IsOAuthSessionPending(state, "codex") {
@@ -1462,7 +1463,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		}
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
+		deadline := time.Now().Add(oauthWaitTimeout)
 		var authCode string
 		for {
 			if !IsOAuthSessionPending(state, "antigravity") {
@@ -1750,7 +1751,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		fmt.Println("Waiting for authentication...")
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-iflow-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
+		deadline := time.Now().Add(oauthWaitTimeout)
 		var resultMap map[string]string
 		for {
 			if !IsOAuthSessionPending(state, "iflow") {
@@ -2620,7 +2621,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 
 			// Wait for callback file
 			waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state))
-			deadline := time.Now().Add(5 * time.Minute)
+			deadline := time.Now().Add(oauthWaitTimeout)
 
 			for {
 				if time.Now().After(deadline) {
@@ -2795,7 +2796,7 @@ func (h *Handler) RequestKiloToken(c *gin.Context) {
 			Metadata: map[string]any{
 				"email":           status.UserEmail,
 				"organization_id": orgID,
-				"model":          defaults.Model,
+				"model":           defaults.Model,
 			},
 		}
 

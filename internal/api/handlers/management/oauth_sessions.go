@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	oauthSessionTTL     = 10 * time.Minute
+	oauthSessionTTL     = 30 * time.Minute
 	maxOAuthStateLength = 128
 )
 
