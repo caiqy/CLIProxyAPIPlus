@@ -742,6 +742,20 @@ func GetOpenAIModels() []*ModelInfo {
 			SupportedParameters: []string{"tools"},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
+		{
+			ID:                  "gpt-5.3-codex-spark",
+			Object:              "model",
+			Created:             1770912000,
+			OwnedBy:             "openai",
+			Type:                "openai",
+			Version:             "gpt-5.3",
+			DisplayName:         "GPT 5.3 Codex Spark",
+			Description:         "Ultra-fast coding model.",
+			ContextLength:       128000,
+			MaxCompletionTokens: 128000,
+			SupportedParameters: []string{"tools"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+		},
 	}
 }
 
@@ -772,6 +786,19 @@ func GetQwenModels() []*ModelInfo {
 			Description:         "Fast code generation model",
 			ContextLength:       8192,
 			MaxCompletionTokens: 2048,
+			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
+		},
+		{
+			ID:                  "coder-model",
+			Object:              "model",
+			Created:             1771171200,
+			OwnedBy:             "qwen",
+			Type:                "qwen",
+			Version:             "3.5",
+			DisplayName:         "Qwen 3.5 Plus",
+			Description:         "efficient hybrid model with leading coding performance",
+			ContextLength:       1048576,
+			MaxCompletionTokens: 65536,
 			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
 		},
 		{
