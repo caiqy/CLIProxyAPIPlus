@@ -66,7 +66,16 @@ func NewIFlowAuth(cfg *config.Config) *IFlowAuth {
 
 // AuthorizationURL builds the authorization URL and matching redirect URI.
 func (ia *IFlowAuth) AuthorizationURL(state string, port int) (authURL, redirectURI string) {
-	redirectURI = fmt.Sprintf("http://localhost:%d/oauth2callback", port)
+	return ia.AuthorizationURLWithHost(state, "localhost", port)
+}
+
+// AuthorizationURLWithHost builds the authorization URL and matching redirect URI with custom host.
+func (ia *IFlowAuth) AuthorizationURLWithHost(state, host string, port int) (authURL, redirectURI string) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		host = "localhost"
+	}
+	redirectURI = fmt.Sprintf("http://%s:%d/oauth2callback", host, port)
 	values := url.Values{}
 	values.Set("loginMethod", "phone")
 	values.Set("type", "phone")

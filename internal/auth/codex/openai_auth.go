@@ -27,6 +27,14 @@ const (
 	RedirectURI = "http://localhost:1455/auth/callback"
 )
 
+func normalizeRedirectURI(redirectURI string) string {
+	trimmed := strings.TrimSpace(redirectURI)
+	if trimmed == "" {
+		return RedirectURI
+	}
+	return trimmed
+}
+
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
 // It manages the HTTP client and provides methods for generating authorization URLs,
 // exchanging authorization codes for tokens, and refreshing access tokens.
@@ -46,14 +54,19 @@ func NewCodexAuth(cfg *config.Config) *CodexAuth {
 // It constructs the URL with the necessary parameters, including the client ID,
 // response type, redirect URI, scopes, and PKCE challenge.
 func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, error) {
+	return o.GenerateAuthURLWithRedirect(state, pkceCodes, RedirectURI)
+}
+
+func (o *CodexAuth) GenerateAuthURLWithRedirect(state string, pkceCodes *PKCECodes, redirectURI string) (string, error) {
 	if pkceCodes == nil {
 		return "", fmt.Errorf("PKCE codes are required")
 	}
+	redirectURI = normalizeRedirectURI(redirectURI)
 
 	params := url.Values{
 		"client_id":                  {ClientID},
 		"response_type":              {"code"},
-		"redirect_uri":               {RedirectURI},
+		"redirect_uri":               {redirectURI},
 		"scope":                      {"openid email profile offline_access"},
 		"state":                      {state},
 		"code_challenge":             {pkceCodes.CodeChallenge},
@@ -71,16 +84,21 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 // It performs an HTTP POST request to the OpenAI token endpoint with the provided
 // authorization code and PKCE verifier.
 func (o *CodexAuth) ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *PKCECodes) (*CodexAuthBundle, error) {
+	return o.ExchangeCodeForTokensWithRedirect(ctx, code, pkceCodes, RedirectURI)
+}
+
+func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code string, pkceCodes *PKCECodes, redirectURI string) (*CodexAuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
 	}
+	redirectURI = normalizeRedirectURI(redirectURI)
 
 	// Prepare token exchange request
 	data := url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {ClientID},
 		"code":          {code},
-		"redirect_uri":  {RedirectURI},
+		"redirect_uri":  {redirectURI},
 		"code_verifier": {pkceCodes.CodeVerifier},
 	}
 

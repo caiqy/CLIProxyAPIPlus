@@ -52,6 +52,7 @@ const (
 	geminiCallbackPort      = 8085
 	codexCallbackPort       = 1455
 	oauthWaitTimeout        = 30 * time.Minute
+	defaultCallbackHost     = "localhost"
 	geminiCLIEndpoint       = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion        = "v1internal"
 	geminiCLIUserAgent      = "google-api-nodejs-client/9.15.1"
@@ -134,6 +135,49 @@ func isWebUIRequest(c *gin.Context) bool {
 	default:
 		return false
 	}
+}
+
+func sanitizeOAuthCallbackHost(raw string) string {
+	host := strings.TrimSpace(raw)
+	if host == "" {
+		return defaultCallbackHost
+	}
+	if strings.Contains(host, "://") {
+		if parsed, err := url.Parse(host); err == nil {
+			host = strings.TrimSpace(parsed.Hostname())
+		} else {
+			return defaultCallbackHost
+		}
+	}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if host == "" {
+		return defaultCallbackHost
+	}
+	if strings.ContainsAny(host, "/?#") {
+		return defaultCallbackHost
+	}
+	return host
+}
+
+func callbackHostFromRequest(c *gin.Context) string {
+	if c == nil {
+		return defaultCallbackHost
+	}
+	return sanitizeOAuthCallbackHost(c.Query("callback_host"))
+}
+
+func buildLoopbackRedirectURI(host string, port int, path string) string {
+	host = sanitizeOAuthCallbackHost(host)
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return fmt.Sprintf("http://%s:%d%s", host, port, path)
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
@@ -876,6 +920,8 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
+	callbackHost := callbackHostFromRequest(c)
+	redirectURI := buildLoopbackRedirectURI(callbackHost, anthropicCallbackPort, "/callback")
 
 	fmt.Println("Initializing Claude authentication...")
 
@@ -899,7 +945,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	anthropicAuth := claude.NewClaudeAuth(h.cfg)
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
-	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
+	authURL, state, err := anthropicAuth.GenerateAuthURLWithRedirect(state, pkceCodes, redirectURI)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -982,7 +1028,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		code := strings.Split(rawCode, "#")[0]
 
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
+		bundle, errExchange := anthropicAuth.ExchangeCodeForTokensWithRedirect(ctx, code, state, pkceCodes, redirectURI)
 		if errExchange != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
 			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
@@ -1020,6 +1066,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	ctx := context.Background()
+	callbackHost := callbackHostFromRequest(c)
 	proxyHTTPClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyHTTPClient)
 
@@ -1032,7 +1079,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	conf := &oauth2.Config{
 		ClientID:     geminiAuth.ClientID,
 		ClientSecret: geminiAuth.ClientSecret,
-		RedirectURL:  fmt.Sprintf("http://localhost:%d/oauth2callback", geminiAuth.DefaultCallbackPort),
+		RedirectURL:  buildLoopbackRedirectURI(callbackHost, geminiAuth.DefaultCallbackPort, "/oauth2callback"),
 		Scopes:       geminiAuth.Scopes,
 		Endpoint:     google.Endpoint,
 	}
@@ -1278,6 +1325,8 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
+	callbackHost := callbackHostFromRequest(c)
+	redirectURI := buildLoopbackRedirectURI(callbackHost, codexCallbackPort, "/auth/callback")
 
 	fmt.Println("Initializing Codex authentication...")
 
@@ -1301,7 +1350,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	openaiAuth := codex.NewCodexAuth(h.cfg)
 
 	// Generate authorization URL
-	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
+	authURL, err := openaiAuth.GenerateAuthURLWithRedirect(state, pkceCodes, redirectURI)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -1370,7 +1419,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		log.Debug("Authorization code received, exchanging for tokens...")
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
+		bundle, errExchange := openaiAuth.ExchangeCodeForTokensWithRedirect(ctx, code, pkceCodes, redirectURI)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
 			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
@@ -1423,6 +1472,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	ctx := context.Background()
+	callbackHost := callbackHostFromRequest(c)
 
 	fmt.Println("Initializing Antigravity authentication...")
 
@@ -1435,7 +1485,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		return
 	}
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
+	redirectURI := buildLoopbackRedirectURI(callbackHost, antigravity.CallbackPort, "/oauth-callback")
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	RegisterOAuthSession(state, "antigravity")
@@ -1718,12 +1768,13 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	ctx := context.Background()
+	callbackHost := callbackHostFromRequest(c)
 
 	fmt.Println("Initializing iFlow authentication...")
 
 	state := fmt.Sprintf("ifl-%d", time.Now().UnixNano())
 	authSvc := iflowauth.NewIFlowAuth(h.cfg)
-	authURL, redirectURI := authSvc.AuthorizationURL(state, iflowauth.CallbackPort)
+	authURL, redirectURI := authSvc.AuthorizationURLWithHost(state, callbackHost, iflowauth.CallbackPort)
 
 	RegisterOAuthSession(state, "iflow")
 
