@@ -2,6 +2,7 @@
 package thinking
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -86,6 +87,12 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //	// Without suffix - uses body config
 //	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro", "gemini", "gemini", "gemini")
 func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, error) {
+	out, _, err := ApplyThinkingWithMeta(body, model, fromFormat, toFormat, providerKey)
+	return out, err
+}
+
+// ApplyThinkingWithMeta applies thinking configuration and returns adaptation metadata.
+func ApplyThinkingWithMeta(body []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, AdaptationMeta, error) {
 	providerFormat := strings.ToLower(strings.TrimSpace(toFormat))
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
 	if providerKey == "" {
@@ -102,12 +109,22 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			"provider": providerFormat,
 			"model":    model,
 		}).Debug("thinking: unknown provider, passthrough |")
-		return body, nil
+		return body, buildAdaptationMeta("", "", "unknown_provider"), nil
 	}
 
 	// 2. Parse suffix and get modelInfo
 	suffixResult := ParseSuffix(model)
 	baseModel := suffixResult.ModelName
+	originConfig := ThinkingConfig{}
+	if suffixResult.HasSuffix {
+		originConfig = parseSuffixToConfig(suffixResult.RawSuffix, providerFormat, model)
+	} else {
+		originConfig = extractThinkingConfig(body, providerFormat)
+	}
+	originVariant := ""
+	if hasThinkingConfig(originConfig) {
+		originVariant = variantFromConfig(originConfig)
+	}
 	// Use provider-specific lookup to handle capability differences across providers.
 	modelInfo := registry.LookupModelInfo(baseModel, providerKey)
 
@@ -115,28 +132,40 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	// Unknown models are treated as user-defined so thinking config can still be applied.
 	// The upstream service is responsible for validating the configuration.
 	if IsUserDefinedModel(modelInfo) {
-		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
+		out, normalized, err := applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
+		if err != nil {
+			return body, buildAdaptationMeta(originVariant, "", "validation_failed"), err
+		}
+		if !hasThinkingConfig(originConfig) {
+			return out, buildAdaptationMeta("", "", "no_explicit_variant"), nil
+		}
+		resolvedVariant := variantFromConfig(normalized)
+		reason := "preserved"
+		if originVariant != resolvedVariant {
+			reason = "user_defined_normalized"
+		}
+		return out, buildAdaptationMeta(originVariant, resolvedVariant, reason), nil
 	}
 	if modelInfo.Thinking == nil {
-		config := extractThinkingConfig(body, providerFormat)
+		config := originConfig
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
 				"model":    baseModel,
 				"provider": providerFormat,
 			}).Debug("thinking: model does not support thinking, stripping config |")
-			return StripThinkingConfig(body, providerFormat), nil
+			return StripThinkingConfig(body, providerFormat), buildAdaptationMeta(originVariant, "", "model_not_support_thinking"), nil
 		}
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
 			"model":    baseModel,
 		}).Debug("thinking: model does not support thinking, passthrough |")
-		return body, nil
+		return body, buildAdaptationMeta("", "", "no_explicit_variant"), nil
 	}
 
 	// 4. Get config: suffix priority over body
 	var config ThinkingConfig
 	if suffixResult.HasSuffix {
-		config = parseSuffixToConfig(suffixResult.RawSuffix, providerFormat, model)
+		config = originConfig
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
 			"model":    model,
@@ -145,7 +174,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			"level":    config.Level,
 		}).Debug("thinking: config from model suffix |")
 	} else {
-		config = extractThinkingConfig(body, providerFormat)
+		config = originConfig
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
 				"provider": providerFormat,
@@ -162,7 +191,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			"provider": providerFormat,
 			"model":    modelInfo.ID,
 		}).Debug("thinking: no config found, passthrough |")
-		return body, nil
+		return body, buildAdaptationMeta("", "", "no_explicit_variant"), nil
 	}
 
 	// 5. Validate and normalize configuration
@@ -176,7 +205,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		// Return original body on validation failure (defensive programming).
 		// This ensures callers who ignore the error won't receive nil body.
 		// The upstream service will decide how to handle the unmodified request.
-		return body, err
+		return body, buildAdaptationMeta(originVariant, "", "validation_failed"), err
 	}
 
 	// Defensive check: ValidateConfig should never return (nil, nil)
@@ -185,7 +214,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			"provider": providerFormat,
 			"model":    modelInfo.ID,
 		}).Warn("thinking: ValidateConfig returned nil config without error, passthrough |")
-		return body, nil
+		return body, buildAdaptationMeta(originVariant, "", "validate_returned_nil"), nil
 	}
 
 	log.WithFields(log.Fields{
@@ -197,7 +226,16 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	}).Debug("thinking: processed config to apply |")
 
 	// 6. Apply configuration using provider-specific applier
-	return applier.Apply(body, *validated, modelInfo)
+	out, err := applier.Apply(body, *validated, modelInfo)
+	if err != nil {
+		return body, buildAdaptationMeta(originVariant, "", "apply_failed"), err
+	}
+	resolvedVariant := variantFromConfig(*validated)
+	reason := "preserved"
+	if originVariant != resolvedVariant {
+		reason = "unsupported_by_model"
+	}
+	return out, buildAdaptationMeta(originVariant, resolvedVariant, reason), nil
 }
 
 // parseSuffixToConfig converts a raw suffix string to ThinkingConfig.
@@ -243,7 +281,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 
 // applyUserDefinedModel applies thinking configuration for user-defined models
 // without ThinkingSupport validation.
-func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat string, suffixResult SuffixResult) ([]byte, error) {
+func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat string, suffixResult SuffixResult) ([]byte, ThinkingConfig, error) {
 	// Get model ID for logging
 	modelID := ""
 	if modelInfo != nil {
@@ -265,7 +303,10 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 			"model":    modelID,
 			"provider": toFormat,
 		}).Debug("thinking: user-defined model, passthrough (no config) |")
-		return body, nil
+		return body, config, nil
+	}
+	if err := validateUserDefinedConfig(config); err != nil {
+		return body, config, err
 	}
 
 	applier := GetProviderApplier(toFormat)
@@ -274,7 +315,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 			"model":    modelID,
 			"provider": toFormat,
 		}).Debug("thinking: user-defined model, passthrough (unknown provider) |")
-		return body, nil
+		return body, config, nil
 	}
 
 	log.WithFields(log.Fields{
@@ -286,7 +327,11 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	}).Debug("thinking: applying config for user-defined model (skip validation)")
 
 	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
-	return applier.Apply(body, config, modelInfo)
+	out, err := applier.Apply(body, config, modelInfo)
+	if err != nil {
+		return body, config, err
+	}
+	return out, config, nil
 }
 
 func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat string) ThinkingConfig {
@@ -304,6 +349,20 @@ func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat stri
 	config.Budget = budget
 	config.Level = ""
 	return config
+}
+
+func validateUserDefinedConfig(config ThinkingConfig) error {
+	if config.Mode != ModeLevel {
+		return nil
+	}
+	level := strings.ToLower(strings.TrimSpace(string(config.Level)))
+	if level == "" {
+		return nil
+	}
+	if _, ok := ConvertLevelToBudget(level); ok {
+		return nil
+	}
+	return NewThinkingError(ErrUnknownLevel, fmt.Sprintf("unknown level: %s", config.Level))
 }
 
 // extractThinkingConfig extracts provider-specific thinking config from request body.

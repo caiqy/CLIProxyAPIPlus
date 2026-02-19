@@ -88,7 +88,7 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = applyThinkingWithUsageMeta(body, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return resp, err
 	}
@@ -179,7 +179,7 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = applyThinkingWithUsageMeta(body, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return nil, err
 	}

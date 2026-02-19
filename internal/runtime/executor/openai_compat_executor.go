@@ -103,7 +103,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = applyThinkingWithUsageMeta(translated, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return resp, err
 	}
@@ -200,7 +200,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = applyThinkingWithUsageMeta(translated, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return nil, err
 	}

@@ -96,7 +96,7 @@ func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = applyThinkingWithUsageMeta(translated, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return resp, err
 	}
@@ -193,7 +193,7 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = applyThinkingWithUsageMeta(translated, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return nil, err
 	}
@@ -456,4 +456,3 @@ func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 
 	return allModels
 }
-

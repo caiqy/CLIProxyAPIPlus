@@ -35,12 +35,12 @@ const (
 	maxScannerBufferSize = 20_971_520
 
 	// Copilot API header values.
-	copilotUserAgent      = "GitHubCopilotChat/0.35.0"
-	copilotEditorVersion  = "vscode/1.107.0"
-	copilotPluginVersion  = "copilot-chat/0.35.0"
-	copilotIntegrationID  = "vscode-chat"
-	copilotOpenAIIntent   = "conversation-panel"
-	copilotGitHubAPIVer   = "2025-04-01"
+	copilotUserAgent     = "GitHubCopilotChat/0.35.0"
+	copilotEditorVersion = "vscode/1.107.0"
+	copilotPluginVersion = "copilot-chat/0.35.0"
+	copilotIntegrationID = "vscode-chat"
+	copilotOpenAIIntent  = "conversation-panel"
+	copilotGitHubAPIVer  = "2025-04-01"
 )
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
@@ -133,7 +133,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	if useResponses {
 		thinkingProvider = "codex"
 	}
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), thinkingProvider, e.Identifier())
+	body, err = applyThinkingWithUsageMeta(body, req.Model, from.String(), thinkingProvider, e.Identifier(), reporter)
 	if err != nil {
 		return resp, err
 	}
@@ -263,7 +263,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if useResponses {
 		thinkingProvider = "codex"
 	}
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), thinkingProvider, e.Identifier())
+	body, err = applyThinkingWithUsageMeta(body, req.Model, from.String(), thinkingProvider, e.Identifier(), reporter)
 	if err != nil {
 		return nil, err
 	}

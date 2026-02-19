@@ -141,7 +141,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = applyThinkingWithUsageMeta(translated, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return resp, err
 	}
@@ -283,7 +283,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = applyThinkingWithUsageMeta(translated, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return resp, err
 	}
@@ -675,7 +675,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = applyThinkingWithUsageMeta(translated, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return nil, err
 	}

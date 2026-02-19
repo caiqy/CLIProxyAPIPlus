@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -16,14 +17,24 @@ import (
 )
 
 type usageReporter struct {
-	provider    string
-	model       string
-	authID      string
-	authIndex   string
-	apiKey      string
-	source      string
-	requestedAt time.Time
-	once        sync.Once
+	provider      string
+	model         string
+	variantOrigin string
+	variant       string
+	authID        string
+	authIndex     string
+	apiKey        string
+	source        string
+	requestedAt   time.Time
+	once          sync.Once
+}
+
+func (r *usageReporter) setThinkingVariant(origin, variant string) {
+	if r == nil {
+		return
+	}
+	r.variantOrigin = strings.TrimSpace(origin)
+	r.variant = strings.TrimSpace(variant)
 }
 
 func newUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *usageReporter {
@@ -74,15 +85,17 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	r.once.Do(func() {
 		usage.PublishRecord(ctx, usage.Record{
-			Provider:    r.provider,
-			Model:       r.model,
-			Source:      r.source,
-			APIKey:      r.apiKey,
-			AuthID:      r.authID,
-			AuthIndex:   r.authIndex,
-			RequestedAt: r.requestedAt,
-			Failed:      failed,
-			Detail:      detail,
+			Provider:      r.provider,
+			Model:         r.model,
+			VariantOrigin: r.variantOrigin,
+			Variant:       r.variant,
+			Source:        r.source,
+			APIKey:        r.apiKey,
+			AuthID:        r.authID,
+			AuthIndex:     r.authIndex,
+			RequestedAt:   r.requestedAt,
+			Failed:        failed,
+			Detail:        detail,
 		})
 	})
 }
@@ -97,17 +110,27 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 	}
 	r.once.Do(func() {
 		usage.PublishRecord(ctx, usage.Record{
-			Provider:    r.provider,
-			Model:       r.model,
-			Source:      r.source,
-			APIKey:      r.apiKey,
-			AuthID:      r.authID,
-			AuthIndex:   r.authIndex,
-			RequestedAt: r.requestedAt,
-			Failed:      false,
-			Detail:      usage.Detail{},
+			Provider:      r.provider,
+			Model:         r.model,
+			VariantOrigin: r.variantOrigin,
+			Variant:       r.variant,
+			Source:        r.source,
+			APIKey:        r.apiKey,
+			AuthID:        r.authID,
+			AuthIndex:     r.authIndex,
+			RequestedAt:   r.requestedAt,
+			Failed:        false,
+			Detail:        usage.Detail{},
 		})
 	})
+}
+
+func applyThinkingWithUsageMeta(body []byte, model, fromFormat, toFormat, providerKey string, reporter *usageReporter) ([]byte, error) {
+	out, meta, err := thinking.ApplyThinkingWithMeta(body, model, fromFormat, toFormat, providerKey)
+	if reporter != nil {
+		reporter.setThinkingVariant(meta.VariantOrigin, meta.Variant)
+	}
+	return out, err
 }
 
 func apiKeyFromContext(ctx context.Context) string {

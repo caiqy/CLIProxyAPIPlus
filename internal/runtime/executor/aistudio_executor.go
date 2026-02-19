@@ -119,6 +119,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	defer reporter.trackFailure(ctx, &err)
 
 	translatedReq, body, err := e.translateRequest(req, opts, false)
+	reporter.setThinkingVariant(body.variantOrigin, body.variant)
 	if err != nil {
 		return resp, err
 	}
@@ -178,6 +179,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	defer reporter.trackFailure(ctx, &err)
 
 	translatedReq, body, err := e.translateRequest(req, opts, true)
+	reporter.setThinkingVariant(body.variantOrigin, body.variant)
 	if err != nil {
 		return nil, err
 	}
@@ -383,9 +385,11 @@ func (e *AIStudioExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (
 }
 
 type translatedPayload struct {
-	payload  []byte
-	action   string
-	toFormat sdktranslator.Format
+	payload       []byte
+	action        string
+	toFormat      sdktranslator.Format
+	variantOrigin string
+	variant       string
 }
 
 func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) ([]byte, translatedPayload, error) {
@@ -400,9 +404,9 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
-	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+	payload, meta, err := thinking.ApplyThinkingWithMeta(payload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
-		return nil, translatedPayload{}, err
+		return nil, translatedPayload{variantOrigin: meta.VariantOrigin, variant: meta.Variant}, err
 	}
 	payload = fixGeminiImageAspectRatio(baseModel, payload)
 	requestedModel := payloadRequestedModel(opts, req.Model)
@@ -421,7 +425,7 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 		action = "streamGenerateContent"
 	}
 	payload, _ = sjson.DeleteBytes(payload, "session_id")
-	return payload, translatedPayload{payload: payload, action: action, toFormat: to}, nil
+	return payload, translatedPayload{payload: payload, action: action, toFormat: to, variantOrigin: meta.VariantOrigin, variant: meta.Variant}, nil
 }
 
 func (e *AIStudioExecutor) buildEndpoint(model, action, alt string) string {

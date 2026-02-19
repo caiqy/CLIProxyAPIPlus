@@ -101,7 +101,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = applyThinkingWithUsageMeta(body, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return resp, err
 	}
@@ -211,7 +211,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = applyThinkingWithUsageMeta(body, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return resp, err
 	}
@@ -301,7 +301,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = applyThinkingWithUsageMeta(body, req.Model, from.String(), to.String(), e.Identifier(), reporter)
 	if err != nil {
 		return nil, err
 	}
