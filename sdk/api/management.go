@@ -20,6 +20,8 @@ type ManagementTokenRequester interface {
 	RequestQwenToken(*gin.Context)
 	RequestKiroToken(*gin.Context)
 	RequestKimiToken(*gin.Context)
+	RequestGitHubToken(*gin.Context)
+	RequestKiloToken(*gin.Context)
 	RequestIFlowToken(*gin.Context)
 	RequestIFlowCookieToken(*gin.Context)
 	GetAuthStatus(c *gin.Context)
@@ -63,6 +65,14 @@ func (m *managementTokenRequester) RequestKiroToken(c *gin.Context) {
 
 func (m *managementTokenRequester) RequestKimiToken(c *gin.Context) {
 	m.handler.RequestKimiToken(c)
+}
+
+func (m *managementTokenRequester) RequestGitHubToken(c *gin.Context) {
+	m.handler.RequestGitHubToken(c)
+}
+
+func (m *managementTokenRequester) RequestKiloToken(c *gin.Context) {
+	m.handler.RequestKiloToken(c)
 }
 
 func (m *managementTokenRequester) RequestIFlowToken(c *gin.Context) {
