@@ -556,6 +556,18 @@ func buildKiroPayloadForFormat(body []byte, modelID, profileArn, origin string, 
 	}
 }
 
+// translateKiroRequestWithThinkingMeta applies request translation and thinking
+// adaptation metadata capture for Kiro executor paths.
+//
+// Kiro request builders consume payloads in the original source schema
+// (openai/claude/...). Therefore we apply thinking on the source format shape
+// and use providerKey="kiro" for model capability lookup.
+func translateKiroRequestWithThinkingMeta(payload []byte, model string, from sdktranslator.Format, reporter *usageReporter) ([]byte, error) {
+	to := sdktranslator.FromString("kiro")
+	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(payload), true)
+	return applyThinkingWithUsageMeta(body, model, from.String(), from.String(), "kiro", reporter)
+}
+
 // NewKiroExecutor creates a new Kiro executor instance.
 func NewKiroExecutor(cfg *config.Config) *KiroExecutor {
 	return &KiroExecutor{cfg: cfg}
@@ -707,7 +719,10 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("kiro")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	body, err := translateKiroRequestWithThinkingMeta(req.Payload, req.Model, from, reporter)
+	if err != nil {
+		return resp, err
+	}
 
 	kiroModelID := e.mapModelToKiro(req.Model)
 
@@ -1139,8 +1154,10 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("kiro")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	body, err := translateKiroRequestWithThinkingMeta(req.Payload, req.Model, from, reporter)
+	if err != nil {
+		return nil, err
+	}
 
 	kiroModelID := e.mapModelToKiro(req.Model)
 
@@ -4459,6 +4476,9 @@ func (e *KiroExecutor) handleWebSearchStream(
 
 	// Usage reporting: track web search requests like normal streaming requests
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	if _, err := translateKiroRequestWithThinkingMeta(req.Payload, req.Model, opts.SourceFormat, reporter); err != nil {
+		return nil, err
+	}
 
 	go func() {
 		var wsErr error
@@ -4572,7 +4592,7 @@ func (e *KiroExecutor) handleWebSearchStream(
 			// Call GAR with modified Claude payload (full translation pipeline)
 			modifiedReq := req
 			modifiedReq.Payload = currentClaudePayload
-			kiroChunks, kiroErr := e.callKiroAndBuffer(ctx, auth, modifiedReq, opts, accessToken, profileArn)
+			kiroChunks, kiroErr := e.callKiroAndBuffer(ctx, auth, modifiedReq, opts, accessToken, profileArn, nil)
 			if kiroErr != nil {
 				log.Warnf("kiro/websearch: Kiro API failed at iteration %d: %v", iteration+1, kiroErr)
 				wsErr = fmt.Errorf("Kiro API failed at iteration %d: %w", iteration+1, kiroErr)
@@ -4736,10 +4756,13 @@ func (e *KiroExecutor) callKiroAndBuffer(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 	accessToken, profileArn string,
+	reporter *usageReporter,
 ) ([][]byte, error) {
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("kiro")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	body, err := translateKiroRequestWithThinkingMeta(req.Payload, req.Model, from, reporter)
+	if err != nil {
+		return nil, err
+	}
 	log.Debugf("kiro/websearch GAR request: %d bytes", len(body))
 
 	kiroModelID := e.mapModelToKiro(req.Model)
@@ -4781,18 +4804,20 @@ func (e *KiroExecutor) callKiroDirectStream(
 	accessToken, profileArn string,
 ) (<-chan cliproxyexecutor.StreamChunk, error) {
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("kiro")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	var streamErr error
+	defer reporter.trackFailure(ctx, &streamErr)
+
+	body, streamErr := translateKiroRequestWithThinkingMeta(req.Payload, req.Model, from, reporter)
+	if streamErr != nil {
+		return nil, streamErr
+	}
 
 	kiroModelID := e.mapModelToKiro(req.Model)
 	isAgentic, isChatOnly := determineAgenticMode(req.Model)
 	effectiveProfileArn := getEffectiveProfileArnWithWarning(auth, profileArn)
 
 	tokenKey := getTokenKey(auth)
-
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
-	var streamErr error
-	defer reporter.trackFailure(ctx, &streamErr)
 
 	stream, streamErr := e.executeStreamWithRetry(
 		ctx, auth, req, opts, accessToken, effectiveProfileArn,
@@ -4831,17 +4856,20 @@ func (e *KiroExecutor) executeNonStreamFallback(
 	accessToken, profileArn string,
 ) (cliproxyexecutor.Response, error) {
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("kiro")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	var err error
+	defer reporter.trackFailure(ctx, &err)
 
+	body, err := translateKiroRequestWithThinkingMeta(req.Payload, req.Model, from, reporter)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+
+	to := sdktranslator.FromString("kiro")
 	kiroModelID := e.mapModelToKiro(req.Model)
 	isAgentic, isChatOnly := determineAgenticMode(req.Model)
 	effectiveProfileArn := getEffectiveProfileArnWithWarning(auth, profileArn)
 	tokenKey := getTokenKey(auth)
-
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
-	var err error
-	defer reporter.trackFailure(ctx, &err)
 
 	resp, err := e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, to, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey)
 	return resp, err
