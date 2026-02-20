@@ -1071,7 +1071,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 // ExecuteStream handles streaming requests to Kiro API.
 // Supports automatic token refresh on 401/403 errors and quota fallback on 429.
-func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	accessToken, profileArn := kiroCredentials(auth)
 	if accessToken == "" {
 		return nil, fmt.Errorf("kiro: access token not found in auth")
@@ -1128,7 +1128,11 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	// Route to MCP endpoint instead of normal Kiro API
 	if kiroclaude.HasWebSearchTool(req.Payload) {
 		log.Infof("kiro: detected pure web_search request, routing to MCP endpoint")
-		return e.handleWebSearchStream(ctx, auth, req, opts, accessToken, profileArn)
+		streamWebSearch, errWebSearch := e.handleWebSearchStream(ctx, auth, req, opts, accessToken, profileArn)
+		if errWebSearch != nil {
+			return nil, errWebSearch
+		}
+		return &cliproxyexecutor.StreamResult{Chunks: streamWebSearch}, nil
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
@@ -1146,7 +1150,11 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Execute stream with retry on 401/403 and 429 (quota exhausted)
 	// Note: currentOrigin and kiroPayload are built inside executeStreamWithRetry for each endpoint
-	return e.executeStreamWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey)
+	streamKiro, errStreamKiro := e.executeStreamWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey)
+	if errStreamKiro != nil {
+		return nil, errStreamKiro
+	}
+	return &cliproxyexecutor.StreamResult{Chunks: streamKiro}, nil
 }
 
 // executeStreamWithRetry performs the streaming HTTP request with automatic retry on auth errors.
@@ -2561,6 +2569,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	isThinkingBlockOpen := false                   // Track if thinking content block SSE event is open
 	thinkingBlockIndex := -1                       // Index of the thinking content block
 	var accumulatedThinkingContent strings.Builder // Accumulate thinking content for token counting
+	hasOfficialReasoningEvent := false             // Disable tag parsing after official reasoning events appear
 
 	// Buffer for handling partial tag matches at chunk boundaries
 	var pendingContent strings.Builder // Buffer content that might be part of a tag
@@ -2996,6 +3005,31 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					lastUsageUpdateTime = time.Now()
 				}
 
+				if hasOfficialReasoningEvent {
+					processText := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(contentDelta, kirocommon.ThinkingStartTag, ""), kirocommon.ThinkingEndTag, ""))
+					if processText != "" {
+						if !isTextBlockOpen {
+							contentBlockIndex++
+							isTextBlockOpen = true
+							blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+							sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+							for _, chunk := range sseData {
+								if chunk != "" {
+									out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+								}
+							}
+						}
+						claudeEvent := kiroclaude.BuildClaudeStreamEvent(processText, contentBlockIndex)
+						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+						for _, chunk := range sseData {
+							if chunk != "" {
+								out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+							}
+						}
+					}
+					continue
+				}
+
 				// TAG-BASED THINKING PARSING: Parse <thinking> tags from content
 				// Combine pending content with new content for processing
 				pendingContent.WriteString(contentDelta)
@@ -3274,6 +3308,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			}
 
 			if thinkingText != "" {
+				hasOfficialReasoningEvent = true
 				// Close text block if open before starting thinking block
 				if isTextBlockOpen && contentBlockIndex >= 0 {
 					blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
