@@ -67,8 +67,9 @@ type callbackForwarder struct {
 }
 
 var (
-	callbackForwardersMu sync.Mutex
-	callbackForwarders   = make(map[int]*callbackForwarder)
+	callbackForwardersMu    sync.Mutex
+	callbackForwarders      = make(map[int]*callbackForwarder)
+	performGeminiCLISetupFn = performGeminiCLISetup
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -1350,7 +1351,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		} else {
 			if errEnsure := ensureGeminiProjectAndOnboard(ctx, gemClient, &ts, requestedProjectID); errEnsure != nil {
 				log.Errorf("Failed to complete Gemini CLI onboarding: %v", errEnsure)
-				SetOAuthSessionError(state, "Failed to complete Gemini CLI onboarding")
+				SetOAuthSessionError(state, geminiOnboardingFailureMessage(requestedProjectID, errEnsure))
 				return
 			}
 
@@ -1360,17 +1361,22 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 				return
 			}
 
-			isChecked, errCheck := checkCloudAPIIsEnabled(ctx, gemClient, ts.ProjectID)
-			if errCheck != nil {
-				log.Errorf("Failed to verify Cloud AI API status: %v", errCheck)
-				SetOAuthSessionError(state, "Failed to verify Cloud AI API status")
-				return
-			}
-			ts.Checked = isChecked
-			if !isChecked {
-				log.Error("Cloud AI API is not enabled for the selected project")
-				SetOAuthSessionError(state, "Cloud AI API not enabled")
-				return
+			if shouldVerifyCloudAPIForProjectSelection(requestedProjectID) {
+				isChecked, errCheck := checkCloudAPIIsEnabled(ctx, gemClient, ts.ProjectID)
+				if errCheck != nil {
+					log.Errorf("Failed to verify Cloud AI API status: %v", errCheck)
+					SetOAuthSessionError(state, "Failed to verify Cloud AI API status")
+					return
+				}
+				ts.Checked = isChecked
+				if !isChecked {
+					log.Error("Cloud AI API is not enabled for the selected project")
+					SetOAuthSessionError(state, "Cloud AI API not enabled")
+					return
+				}
+			} else {
+				ts.Checked = false
+				log.Infof("Skipping Cloud AI API verification for default discovery path (resolved project: %s)", ts.ProjectID)
 			}
 		}
 
@@ -2145,35 +2151,35 @@ func (e *projectSelectionRequiredError) Error() string {
 	return "gemini cli: project selection required"
 }
 
+func shouldVerifyCloudAPIForProjectSelection(requestedProjectID string) bool {
+	return strings.TrimSpace(requestedProjectID) != ""
+}
+
+func geminiOnboardingFailureMessage(requestedProjectID string, err error) string {
+	if strings.TrimSpace(requestedProjectID) == "" {
+		return "Failed to auto-discover project ID"
+	}
+	_ = err
+	return "Failed to complete Gemini CLI onboarding"
+}
+
 func ensureGeminiProjectAndOnboard(ctx context.Context, httpClient *http.Client, storage *geminiAuth.GeminiTokenStorage, requestedProject string) error {
 	if storage == nil {
 		return fmt.Errorf("gemini storage is nil")
 	}
 
 	trimmedRequest := strings.TrimSpace(requestedProject)
-	if trimmedRequest == "" {
-		projects, errProjects := fetchGCPProjects(ctx, httpClient)
-		if errProjects != nil {
-			return fmt.Errorf("fetch project list: %w", errProjects)
-		}
-		if len(projects) == 0 {
-			return fmt.Errorf("no Google Cloud projects available for this account")
-		}
-		trimmedRequest = strings.TrimSpace(projects[0].ProjectID)
-		if trimmedRequest == "" {
-			return fmt.Errorf("resolved project id is empty")
-		}
-		storage.Auto = true
-	} else {
-		storage.Auto = false
-	}
+	storage.Auto = trimmedRequest == ""
 
-	if err := performGeminiCLISetup(ctx, httpClient, storage, trimmedRequest); err != nil {
+	if err := performGeminiCLISetupFn(ctx, httpClient, storage, trimmedRequest); err != nil {
 		return err
 	}
 
-	if strings.TrimSpace(storage.ProjectID) == "" {
+	if strings.TrimSpace(storage.ProjectID) == "" && trimmedRequest != "" {
 		storage.ProjectID = trimmedRequest
+	}
+	if strings.TrimSpace(storage.ProjectID) == "" {
+		return fmt.Errorf("resolved project id is empty")
 	}
 
 	return nil
