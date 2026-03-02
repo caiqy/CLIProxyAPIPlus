@@ -579,16 +579,6 @@ func LoadConfig(configFile string) (*Config, error) {
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
-	// NOTE: Startup oauth-model-alias migration is intentionally disabled.
-	// Reason: avoid mutating config.yaml during server startup.
-	// Re-enable the block below if automatic startup migration is needed again.
-	// if migrated, err := MigrateOAuthModelAlias(configFile); err != nil {
-	// 	// Log warning but don't fail - config loading should still work
-	// 	fmt.Printf("Warning: oauth-model-alias migration failed: %v\n", err)
-	// } else if migrated {
-	// 	fmt.Println("Migrated oauth-model-mappings to oauth-model-alias")
-	// }
-
 	// Read the entire configuration file into memory.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -778,6 +768,45 @@ func payloadRawString(value any) ([]byte, bool) {
 		return typed, true
 	default:
 		return nil, false
+	}
+}
+
+// defaultKiroAliases returns the default oauth-model-alias configuration
+// for the kiro channel. Maps kiro-prefixed model names to standard Claude model
+// names so that clients like Claude Code can use standard names directly.
+func defaultKiroAliases() []OAuthModelAlias {
+	return []OAuthModelAlias{
+		// Sonnet 4.6
+		{Name: "kiro-claude-sonnet-4-6", Alias: "claude-sonnet-4-6", Fork: true},
+		// Sonnet 4.5
+		{Name: "kiro-claude-sonnet-4-5", Alias: "claude-sonnet-4-5-20250929", Fork: true},
+		{Name: "kiro-claude-sonnet-4-5", Alias: "claude-sonnet-4-5", Fork: true},
+		// Sonnet 4
+		{Name: "kiro-claude-sonnet-4", Alias: "claude-sonnet-4-20250514", Fork: true},
+		{Name: "kiro-claude-sonnet-4", Alias: "claude-sonnet-4", Fork: true},
+		// Opus 4.6
+		{Name: "kiro-claude-opus-4-6", Alias: "claude-opus-4-6", Fork: true},
+		// Opus 4.5
+		{Name: "kiro-claude-opus-4-5", Alias: "claude-opus-4-5-20251101", Fork: true},
+		{Name: "kiro-claude-opus-4-5", Alias: "claude-opus-4-5", Fork: true},
+		// Haiku 4.5
+		{Name: "kiro-claude-haiku-4-5", Alias: "claude-haiku-4-5-20251001", Fork: true},
+		{Name: "kiro-claude-haiku-4-5", Alias: "claude-haiku-4-5", Fork: true},
+	}
+}
+
+// defaultGitHubCopilotAliases returns default oauth-model-alias entries that
+// expose Claude hyphen-style IDs for GitHub Copilot Claude models.
+// This keeps compatibility with clients (e.g. Claude Code) that use
+// Anthropic-style model IDs like "claude-opus-4-6".
+func defaultGitHubCopilotAliases() []OAuthModelAlias {
+	return []OAuthModelAlias{
+		{Name: "claude-haiku-4.5", Alias: "claude-haiku-4-5", Fork: true},
+		{Name: "claude-opus-4.1", Alias: "claude-opus-4-1", Fork: true},
+		{Name: "claude-opus-4.5", Alias: "claude-opus-4-5", Fork: true},
+		{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
+		{Name: "claude-sonnet-4.5", Alias: "claude-sonnet-4-5", Fork: true},
+		{Name: "claude-sonnet-4.6", Alias: "claude-sonnet-4-6", Fork: true},
 	}
 }
 
@@ -1676,9 +1705,6 @@ func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
 	srcIdx := findMapKeyIndex(srcRoot, key)
 	if srcIdx < 0 {
 		// Keep an explicit empty mapping for oauth-model-alias when it was previously present.
-		//
-		// Rationale: LoadConfig runs MigrateOAuthModelAlias before unmarshalling. If the
-		// oauth-model-alias key is missing, migration will add the default antigravity aliases.
 		// When users delete the last channel from oauth-model-alias via the management API,
 		// we want that deletion to persist across hot reloads and restarts.
 		if key == "oauth-model-alias" {

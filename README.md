@@ -13,6 +13,8 @@ The Plus release stays in lockstep with the mainline features.
 - Added GitHub Copilot support (OAuth login), provided by [em4go](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)
 - Added Kiro (AWS CodeWhisperer) support (OAuth login), provided by [fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration), [Ravens2121](https://github.com/Ravens2121/CLIProxyAPIPlus/)
 
+[![z.ai](https://assets.router-for.me/english-5.png)](https://z.ai/subscribe?ic=8JVLJQFSKB)
+
 ## New Features (Plus Enhanced)
 
 - **OAuth Web Authentication**: Browser-based OAuth login for Kiro with beautiful web UI

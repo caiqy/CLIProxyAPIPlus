@@ -13,6 +13,8 @@
 - 新增 GitHub Copilot 支持（OAuth 登录），由[em4go](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)提供
 - 新增 Kiro (AWS CodeWhisperer) 支持 (OAuth 登录), 由[fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration)、[Ravens2121](https://github.com/Ravens2121/CLIProxyAPIPlus/)提供
 
+[![bigmodel.cn](https://assets.router-for.me/chinese-5.png)](https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII)
+
 ## 新增功能 (Plus 增强版)
 
 - **OAuth Web 认证**: 基于浏览器的 Kiro OAuth 登录，提供美观的 Web UI

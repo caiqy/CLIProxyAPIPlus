@@ -2442,9 +2442,7 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 		return fmt.Errorf("create request: %w", errRequest)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", geminiCLIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", geminiCLIApiClient)
-	req.Header.Set("Client-Metadata", geminiCLIClientMetadata)
+	req.Header.Set("User-Agent", misc.GeminiCLIUserAgent(""))
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -2514,7 +2512,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to create request: %w", errRequest)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", geminiCLIUserAgent)
+		req.Header.Set("User-Agent", misc.GeminiCLIUserAgent(""))
 		resp, errDo := httpClient.Do(req)
 		if errDo != nil {
 			return false, fmt.Errorf("failed to execute request: %w", errDo)
@@ -2535,7 +2533,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to create request: %w", errRequest)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", geminiCLIUserAgent)
+		req.Header.Set("User-Agent", misc.GeminiCLIUserAgent(""))
 		resp, errDo = httpClient.Do(req)
 		if errDo != nil {
 			return false, fmt.Errorf("failed to execute request: %w", errDo)
