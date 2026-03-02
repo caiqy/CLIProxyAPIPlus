@@ -10,17 +10,9 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
-
-var standardOpenAIReasoningEffort = map[string]struct{}{
-	"none":   {},
-	"low":    {},
-	"medium": {},
-	"high":   {},
-}
 
 // Applier implements thinking.ProviderApplier for OpenAI models.
 //
@@ -120,10 +112,6 @@ func applyCompatibleOpenAI(body []byte, config thinking.ThinkingConfig) ([]byte,
 		effort = level
 	default:
 		return body, nil
-	}
-	if _, ok := standardOpenAIReasoningEffort[strings.ToLower(strings.TrimSpace(effort))]; !ok {
-		log.WithField("reasoning_effort", effort).
-			Warn("openai: user-defined model uses non-standard reasoning_effort, upstream compatibility may vary |")
 	}
 
 	result, _ := sjson.SetBytes(body, "reasoning_effort", effort)
