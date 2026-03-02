@@ -128,7 +128,9 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 }
 
 func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) {
-	request := cliproxyexecutor.Request{Model: "test-model"}
+	// Leave model empty so this test focuses on cross-credential retry limits,
+	// independent of runtime model registration filtering.
+	request := cliproxyexecutor.Request{}
 	testCases := []struct {
 		name   string
 		invoke func(*Manager) error
