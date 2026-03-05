@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // ConvertCodexResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
