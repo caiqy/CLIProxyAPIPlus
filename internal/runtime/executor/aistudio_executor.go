@@ -123,6 +123,9 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	if err != nil {
 		return resp, err
 	}
+	if e.relay == nil {
+		return resp, fmt.Errorf("aistudio executor: ws relay is nil")
+	}
 
 	endpoint := e.buildEndpoint(baseModel, body.action, opts.Alt)
 	wsReq := &wsrelay.HTTPRequest{
@@ -182,6 +185,9 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	reporter.setThinkingVariant(body.variantOrigin, body.variant)
 	if err != nil {
 		return nil, err
+	}
+	if e.relay == nil {
+		return nil, fmt.Errorf("aistudio executor: ws relay is nil")
 	}
 
 	endpoint := e.buildEndpoint(baseModel, body.action, opts.Alt)
@@ -324,6 +330,9 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 
 // CountTokens counts tokens for the given request using the AI Studio API.
 func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if e.relay == nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("aistudio executor: ws relay is nil")
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	_, body, err := e.translateRequest(req, opts, false)
 	if err != nil {

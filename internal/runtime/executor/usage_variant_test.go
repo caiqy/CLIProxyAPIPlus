@@ -59,7 +59,7 @@ func TestAIStudioExecuteFailurePublishesVariantFromThinkingMeta(t *testing.T) {
 		Payload: []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`),
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
 	if err == nil {
-		t.Fatal("expected execute error for unsupported level")
+		t.Fatal("expected execute error when ws relay is missing")
 	}
 
 	timer := time.NewTimer(2 * time.Second)
@@ -73,8 +73,8 @@ func TestAIStudioExecuteFailurePublishesVariantFromThinkingMeta(t *testing.T) {
 			if !rec.Failed {
 				continue
 			}
-			if rec.VariantOrigin != "xhigh" || rec.Variant != "" {
-				t.Fatalf("expected failed record variant origin xhigh and empty variant, got %q => %q", rec.VariantOrigin, rec.Variant)
+			if rec.VariantOrigin != "xhigh" || rec.Variant != "high" {
+				t.Fatalf("expected failed record variant origin xhigh and adapted variant high, got %q => %q", rec.VariantOrigin, rec.Variant)
 			}
 			return
 		case <-timer.C:
