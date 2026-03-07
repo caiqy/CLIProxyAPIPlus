@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -829,8 +830,8 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 	executor := NewClaudeExecutor(&config.Config{})
 	// Inject Accept-Encoding via the custom header attribute mechanism.
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":             "key-123",
-		"base_url":            server.URL,
+		"api_key":                "key-123",
+		"base_url":               server.URL,
 		"header:Accept-Encoding": "gzip, deflate, br, zstd",
 	}}
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
@@ -966,4 +967,213 @@ func TestClaudeExecutor_ExecuteStream_GzipErrorBodyNoContentEncodingHeader(t *te
 	if !strings.Contains(err.Error(), "stream test error") {
 		t.Errorf("error message should contain decompressed JSON, got: %q", err.Error())
 	}
+}
+
+func TestClaudeExecutor_ExecuteStream_AnthropicLifecycleRepairsEarlyStop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			"",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"he"}}`,
+			"",
+			`data: {"type":"content_block_stop","index":0}`,
+			"",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"llo"}}`,
+			"",
+			`data: {"type":"message_stop"}`,
+			"",
+		}, "\n")))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	stream := collectClaudeStreamPayload(t, result)
+	if got := claudeEventTypesFromStream(stream); !reflect.DeepEqual(got, []string{
+		"content_block_start",
+		"content_block_delta",
+		"content_block_delta",
+		"content_block_stop",
+		"message_stop",
+	}) {
+		t.Fatalf("event types = %#v, stream = %q", got, stream)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_AnthropicLifecycleFlushesPendingStopAtEOF(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			"",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"he"}}`,
+			"",
+			`data: {"type":"content_block_stop","index":0}`,
+			"",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"llo"}}`,
+			"",
+		}, "\n")))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	stream := collectClaudeStreamPayload(t, result)
+	if got := claudeEventTypesFromStream(stream); !reflect.DeepEqual(got, []string{
+		"content_block_start",
+		"content_block_delta",
+		"content_block_delta",
+		"content_block_stop",
+	}) {
+		t.Fatalf("event types = %#v, stream = %q", got, stream)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_AnthropicLifecycleDisabledFallsBackToRawOrder(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			"",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"he"}}`,
+			"",
+			`data: {"type":"content_block_stop","index":0}`,
+			"",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"llo"}}`,
+			"",
+			`data: {"type":"message_stop"}`,
+			"",
+		}, "\n")))
+	}))
+	defer server.Close()
+
+	disabled := false
+	executor := NewClaudeExecutor(&config.Config{SDKConfig: config.SDKConfig{Streaming: config.StreamingConfig{AnthropicSSELifecycleEnable: &disabled}}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	stream := collectClaudeStreamPayload(t, result)
+	if got := claudeEventTypesFromStream(stream); !reflect.DeepEqual(got, []string{
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_delta",
+		"message_stop",
+	}) {
+		t.Fatalf("event types = %#v, stream = %q", got, stream)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_AnthropicLifecycleFlushesPriorIndexBeforeNewBlock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			"",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one"}}`,
+			"",
+			`data: {"type":"content_block_stop","index":0}`,
+			"",
+			`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_1","name":"Read","input":{}}}`,
+			"",
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}`,
+			"",
+			`data: {"type":"message_stop"}`,
+			"",
+		}, "\n")))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	stream := collectClaudeStreamPayload(t, result)
+	if got := claudeEventTypesFromStream(stream); !reflect.DeepEqual(got, []string{
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"content_block_start",
+		"content_block_delta",
+		"message_stop",
+	}) {
+		t.Fatalf("event types = %#v, stream = %q", got, stream)
+	}
+}
+
+func collectClaudeStreamPayload(t *testing.T, result *cliproxyexecutor.StreamResult) string {
+	t.Helper()
+	var combined strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		combined.Write(chunk.Payload)
+	}
+	return combined.String()
+}
+
+func claudeEventTypesFromStream(stream string) []string {
+	lines := strings.Split(stream, "\n")
+	types := make([]string, 0, len(lines))
+	for _, line := range lines {
+		payload := jsonPayload([]byte(line))
+		if len(payload) == 0 {
+			continue
+		}
+		eventType := gjson.GetBytes(payload, "type").String()
+		if eventType != "" {
+			types = append(types, eventType)
+		}
+	}
+	return types
 }

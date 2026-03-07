@@ -58,6 +58,20 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// AnthropicSSELifecycleEnable controls whether Claude -> Claude direct streams
+	// normalize Anthropic SSE content_block lifecycle ordering.
+	// nil means enabled by default.
+	AnthropicSSELifecycleEnable *bool `yaml:"anthropic-sse-lifecycle-enable,omitempty" json:"anthropic-sse-lifecycle-enable,omitempty"`
+}
+
+// AnthropicSSELifecycleEnabled reports whether the Anthropic SSE lifecycle
+// normalizer should run for Claude direct streams. The default is enabled.
+func (s StreamingConfig) AnthropicSSELifecycleEnabled() bool {
+	if s.AnthropicSSELifecycleEnable == nil {
+		return true
+	}
+	return *s.AnthropicSSELifecycleEnable
 }
 
 // Default upstream timeout values (in seconds)

@@ -396,25 +396,61 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if from == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
-			for scanner.Scan() {
-				line := scanner.Bytes()
-				appendAPIResponseChunk(ctx, e.cfg, line)
+			normalizerEnabled := true
+			if e.cfg != nil {
+				normalizerEnabled = e.cfg.Streaming.AnthropicSSELifecycleEnabled()
+			}
+			var normalizer *AnthropicSSELifecycleNormalizer
+			if normalizerEnabled {
+				normalizer = newAnthropicSSELifecycleNormalizer()
+			}
+			emitLine := func(line []byte) {
 				if detail, ok := parseClaudeStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
 				}
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 				}
-				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
 				cloned[len(line)] = '\n'
 				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
 			}
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				appendAPIResponseChunk(ctx, e.cfg, line)
+				if normalizer == nil {
+					emitLine(line)
+					continue
+				}
+				normalized, errNormalize := normalizer.ProcessLine(line)
+				if errNormalize != nil {
+					recordAPIResponseError(ctx, e.cfg, errNormalize)
+					reporter.publishFailure(ctx)
+					out <- cliproxyexecutor.StreamChunk{Err: errNormalize}
+					return
+				}
+				for _, normalizedLine := range normalized {
+					emitLine(normalizedLine)
+				}
+			}
 			if errScan := scanner.Err(); errScan != nil {
 				recordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.publishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
+				return
+			}
+			if normalizer != nil {
+				finalized, errFinalize := normalizer.Finalize()
+				if errFinalize != nil {
+					recordAPIResponseError(ctx, e.cfg, errFinalize)
+					reporter.publishFailure(ctx)
+					out <- cliproxyexecutor.StreamChunk{Err: errFinalize}
+					return
+				}
+				for _, finalizedLine := range finalized {
+					emitLine(finalizedLine)
+				}
 			}
 			return
 		}
