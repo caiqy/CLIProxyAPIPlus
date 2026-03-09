@@ -77,6 +77,21 @@ func (e *GitHubCopilotExecutor) PrepareRequest(req *http.Request, auth *cliproxy
 	if req == nil {
 		return nil
 	}
+	if isGitHubCopilotInternalAPIRequest(req) {
+		if auth == nil {
+			return statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
+		}
+		accessToken := metaStringValue(auth.Metadata, "access_token")
+		if accessToken == "" {
+			return statusErr{code: http.StatusUnauthorized, msg: "missing github access token"}
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		if strings.TrimSpace(req.Header.Get("Accept")) == "" {
+			req.Header.Set("Accept", "application/json")
+		}
+		req.Header.Set("User-Agent", copilotUserAgent)
+		return nil
+	}
 	ctx := req.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -88,6 +103,18 @@ func (e *GitHubCopilotExecutor) PrepareRequest(req *http.Request, auth *cliproxy
 	useMessages := req.URL != nil && strings.HasPrefix(req.URL.Path, githubCopilotMessagesPath)
 	e.applyHeaders(req, apiToken, nil, false, useMessages)
 	return nil
+}
+
+func isGitHubCopilotInternalAPIRequest(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	host := strings.TrimSpace(strings.ToLower(req.URL.Hostname()))
+	if host != "api.github.com" {
+		return false
+	}
+	path := strings.TrimSpace(req.URL.Path)
+	return strings.HasPrefix(path, "/copilot_internal/")
 }
 
 // HttpRequest injects GitHub Copilot credentials into the request and executes it.

@@ -76,6 +76,34 @@ func TestUseGitHubCopilotResponsesEndpoint_OpenAIResponseSource(t *testing.T) {
 	}
 }
 
+func TestGitHubCopilotPrepareRequest_UsesBearerAccessTokenForCopilotInternalAPI(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	e := NewGitHubCopilotExecutor(cfg)
+	accessToken := "gho_request_token"
+	e.cache[accessToken] = &cachedAPIToken{
+		token:       "api_token_from_exchange",
+		apiEndpoint: githubCopilotBaseURL,
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": accessToken}}
+	req, errReq := http.NewRequest(http.MethodGet, "https://api.github.com/copilot_internal/user", nil)
+	if errReq != nil {
+		t.Fatalf("new request: %v", errReq)
+	}
+
+	err := e.PrepareRequest(req, auth)
+	if err != nil {
+		t.Fatalf("PrepareRequest returned error: %v", err)
+	}
+
+	if got := req.Header.Get("Authorization"); got != "Bearer "+accessToken {
+		t.Fatalf("authorization = %q, want %q", got, "Bearer "+accessToken)
+	}
+}
+
 func TestUseGitHubCopilotResponsesEndpoint_CodexModel(t *testing.T) {
 	t.Parallel()
 	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5-codex") {
