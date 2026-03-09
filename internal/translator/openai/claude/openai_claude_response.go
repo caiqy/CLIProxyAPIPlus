@@ -159,29 +159,29 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			// Don't send content_block_start for text here - wait for actual content
 		}
 
-		// Handle reasoning content delta
-		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
-			for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
-				if reasoningText == "" {
-					continue
-				}
-				stopTextContentBlock(param, &results)
-				if !param.ThinkingContentBlockStarted {
-					if param.ThinkingContentBlockIndex == -1 {
-						param.ThinkingContentBlockIndex = param.NextContentBlockIndex
-						param.NextContentBlockIndex++
-					}
-					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
-					contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "index", param.ThinkingContentBlockIndex)
-					results = append(results, "event: content_block_start\ndata: "+contentBlockStartJSON+"\n\n")
-					param.ThinkingContentBlockStarted = true
-				}
-
-				thinkingDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`
-				thinkingDeltaJSON, _ = sjson.Set(thinkingDeltaJSON, "index", param.ThinkingContentBlockIndex)
-				thinkingDeltaJSON, _ = sjson.Set(thinkingDeltaJSON, "delta.thinking", reasoningText)
-				results = append(results, "event: content_block_delta\ndata: "+thinkingDeltaJSON+"\n\n")
+		// Handle reasoning content delta.
+		// Gemini on Copilot emits delta.reasoning_text, while OpenAI emits
+		// delta.reasoning_content. Support both.
+		for _, reasoningText := range collectOpenAIReasoningTextsFromFields(delta, "reasoning_content", "reasoning_text") {
+			if reasoningText == "" {
+				continue
 			}
+			stopTextContentBlock(param, &results)
+			if !param.ThinkingContentBlockStarted {
+				if param.ThinkingContentBlockIndex == -1 {
+					param.ThinkingContentBlockIndex = param.NextContentBlockIndex
+					param.NextContentBlockIndex++
+				}
+				contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
+				contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "index", param.ThinkingContentBlockIndex)
+				results = append(results, "event: content_block_start\ndata: "+contentBlockStartJSON+"\n\n")
+				param.ThinkingContentBlockStarted = true
+			}
+
+			thinkingDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`
+			thinkingDeltaJSON, _ = sjson.Set(thinkingDeltaJSON, "index", param.ThinkingContentBlockIndex)
+			thinkingDeltaJSON, _ = sjson.Set(thinkingDeltaJSON, "delta.thinking", reasoningText)
+			results = append(results, "event: content_block_delta\ndata: "+thinkingDeltaJSON+"\n\n")
 		}
 
 		// Handle content delta
@@ -393,8 +393,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0] // Take first choice
 
-		reasoningNode := choice.Get("message.reasoning_content")
-		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
+		for _, reasoningText := range collectOpenAIReasoningTextsFromFields(choice.Get("message"), "reasoning_content", "reasoning_text") {
 			if reasoningText == "" {
 				continue
 			}
@@ -510,6 +509,24 @@ func collectOpenAIReasoningTexts(node gjson.Result) []string {
 		}
 	}
 
+	return texts
+}
+
+func collectOpenAIReasoningTextsFromFields(parent gjson.Result, fields ...string) []string {
+	var texts []string
+	if !parent.Exists() {
+		return texts
+	}
+	for _, field := range fields {
+		if field == "" {
+			continue
+		}
+		node := parent.Get(field)
+		if !node.Exists() {
+			continue
+		}
+		texts = append(texts, collectOpenAIReasoningTexts(node)...)
+	}
 	return texts
 }
 
@@ -654,15 +671,13 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 				}
 			}
 
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
-				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
-					if reasoningText == "" {
-						continue
-					}
-					block := `{"type":"thinking","thinking":""}`
-					block, _ = sjson.Set(block, "thinking", reasoningText)
-					out, _ = sjson.SetRaw(out, "content.-1", block)
+			for _, reasoningText := range collectOpenAIReasoningTextsFromFields(message, "reasoning_content", "reasoning_text") {
+				if reasoningText == "" {
+					continue
 				}
+				block := `{"type":"thinking","thinking":""}`
+				block, _ = sjson.Set(block, "thinking", reasoningText)
+				out, _ = sjson.SetRaw(out, "content.-1", block)
 			}
 
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
