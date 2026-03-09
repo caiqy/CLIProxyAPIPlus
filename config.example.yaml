@@ -70,6 +70,11 @@ usage-statistics-enabled: false
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ''
 
+# Global TLS certificate verification switch for upstream API requests.
+# true = skip TLS certificate verification (INSECURE; use only in controlled environments)
+# false = strict verification (default)
+tls-insecure-skip-verify: false
+
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 

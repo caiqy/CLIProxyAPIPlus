@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -73,10 +74,11 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// Log timeout configuration at debug level
 	log.Debugf("upstream timeouts: connect=%ds, response-header=%ds", connectTimeout, responseHeaderTimeout)
+	insecureSkipVerify := cfg != nil && cfg.TLSInsecureSkipVerify
 
-	// Build cache key from proxy URL and timeout config (empty string for no proxy)
-	// Include timeout values in cache key to ensure different timeout configs get different clients
-	cacheKey := fmt.Sprintf("%s|%d|%d", proxyURL, connectTimeout, responseHeaderTimeout)
+	// Build cache key from proxy URL, timeout config, and TLS verify mode (empty string for no proxy)
+	// Include timeout values and insecureSkipVerify to avoid stale transport reuse after config toggles.
+	cacheKey := fmt.Sprintf("%s|%d|%d|%t", proxyURL, connectTimeout, responseHeaderTimeout, insecureSkipVerify)
 
 	// Check cache first
 	httpClientCacheMutex.RLock()
@@ -101,7 +103,7 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL, connectTimeout, responseHeaderTimeout)
+		transport := buildProxyTransport(proxyURL, connectTimeout, responseHeaderTimeout, insecureSkipVerify)
 		if transport != nil {
 			httpClient.Transport = transport
 			// Cache the client
@@ -115,7 +117,7 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	// No proxy - create transport based on DefaultTransport with timeout configuration
-	transport := buildDefaultTransportWithTimeouts(connectTimeout, responseHeaderTimeout)
+	transport := buildDefaultTransportWithTimeouts(connectTimeout, responseHeaderTimeout, insecureSkipVerify)
 	httpClient.Transport = transport
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
@@ -143,9 +145,10 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 //
 // Returns:
 //   - *http.Transport: A configured transport with timeouts applied
-func buildDefaultTransportWithTimeouts(connectTimeoutSec, responseHeaderTimeoutSec int) *http.Transport {
+func buildDefaultTransportWithTimeouts(connectTimeoutSec, responseHeaderTimeoutSec int, insecureSkipVerify bool) *http.Transport {
 	// Clone DefaultTransport to preserve reasonable defaults (MaxIdleConns, TLSHandshakeTimeout, etc.)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	applyTransportTLSInsecureSkipVerify(transport, insecureSkipVerify)
 
 	// Apply connect timeout via custom Dialer
 	if connectTimeoutSec > 0 {
@@ -182,7 +185,7 @@ func buildDefaultTransportWithTimeouts(connectTimeoutSec, responseHeaderTimeoutS
 //
 // Returns:
 //   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
-func buildProxyTransport(proxyURL string, connectTimeoutSec, responseHeaderTimeoutSec int) *http.Transport {
+func buildProxyTransport(proxyURL string, connectTimeoutSec, responseHeaderTimeoutSec int, insecureSkipVerify bool) *http.Transport {
 	if proxyURL == "" {
 		return nil
 	}
@@ -195,6 +198,7 @@ func buildProxyTransport(proxyURL string, connectTimeoutSec, responseHeaderTimeo
 
 	// Start with DefaultTransport clone to preserve reasonable defaults
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	applyTransportTLSInsecureSkipVerify(transport, insecureSkipVerify)
 
 	// Apply response header timeout
 	if responseHeaderTimeoutSec > 0 {
@@ -274,6 +278,18 @@ func buildProxyTransport(proxyURL string, connectTimeoutSec, responseHeaderTimeo
 	}
 
 	return transport
+}
+
+func applyTransportTLSInsecureSkipVerify(transport *http.Transport, insecureSkipVerify bool) {
+	if transport == nil {
+		return
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.InsecureSkipVerify = insecureSkipVerify
 }
 
 // IsTimeoutError checks if an error is a timeout error and returns the timeout type.

@@ -5,6 +5,7 @@ package util
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +19,13 @@ import (
 // It supports SOCKS5, HTTP, and HTTPS proxies. The function modifies the client's transport
 // to route requests through the configured proxy server.
 func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
+	if cfg == nil {
+		return httpClient
+	}
+
 	var transport *http.Transport
 	// Attempt to parse the proxy URL from the configuration.
 	proxyURL, errParse := url.Parse(cfg.ProxyURL)
@@ -47,8 +55,21 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 			transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
 		}
 	}
+	if transport == nil && cfg.TLSInsecureSkipVerify {
+		if existing, ok := httpClient.Transport.(*http.Transport); ok && existing != nil {
+			transport = existing.Clone()
+		} else {
+			transport = http.DefaultTransport.(*http.Transport).Clone()
+		}
+	}
 	// If a new transport was created, apply it to the HTTP client.
 	if transport != nil {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		} else {
+			transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+		}
+		transport.TLSClientConfig.InsecureSkipVerify = cfg != nil && cfg.TLSInsecureSkipVerify
 		httpClient.Transport = transport
 	}
 	return httpClient

@@ -225,8 +225,8 @@ func logRetryAttempt(attempt, maxRetries int, reason string, delay time.Duration
 // This reduces connection overhead and improves performance for concurrent requests.
 // Based on kiro2Api's connection pooling pattern.
 var (
-	kiroHTTPClientPool     *http.Client
-	kiroHTTPClientPoolOnce sync.Once
+	kiroHTTPClientPoolMu sync.RWMutex
+	kiroHTTPClientPools  = make(map[string]*http.Client)
 )
 
 // getKiroPooledHTTPClient returns a shared HTTP client with optimized connection pooling.
@@ -240,57 +240,73 @@ var (
 // Parameters:
 //   - cfg: The application configuration (includes upstream timeout settings)
 func getKiroPooledHTTPClient(cfg *config.Config) *http.Client {
-	kiroHTTPClientPoolOnce.Do(func() {
-		// Get upstream timeout configuration from global config
-		var sdkCfg *config.SDKConfig
-		if cfg != nil {
-			sdkCfg = &cfg.SDKConfig
-		}
-		connectTimeoutSec, responseHeaderTimeoutSec, err := config.GetUpstreamTimeouts(sdkCfg)
-		if err != nil {
-			// Negative timeout values are invalid - log error and use defaults
-			log.Errorf("kiro: invalid upstream timeout configuration: %v, using defaults", err)
-			connectTimeoutSec = config.DefaultConnectTimeoutSeconds
-			responseHeaderTimeoutSec = config.DefaultResponseHeaderTimeoutSeconds
-		}
+	// Get upstream timeout configuration from global config
+	var sdkCfg *config.SDKConfig
+	if cfg != nil {
+		sdkCfg = &cfg.SDKConfig
+	}
+	connectTimeoutSec, responseHeaderTimeoutSec, err := config.GetUpstreamTimeouts(sdkCfg)
+	if err != nil {
+		// Negative timeout values are invalid - log error and use defaults
+		log.Errorf("kiro: invalid upstream timeout configuration: %v, using defaults", err)
+		connectTimeoutSec = config.DefaultConnectTimeoutSeconds
+		responseHeaderTimeoutSec = config.DefaultResponseHeaderTimeoutSeconds
+	}
+	insecureSkipVerify := cfg != nil && cfg.TLSInsecureSkipVerify
+	poolKey := fmt.Sprintf("%d|%d|%t", connectTimeoutSec, responseHeaderTimeoutSec, insecureSkipVerify)
 
-		connectTimeout := time.Duration(connectTimeoutSec) * time.Second
-		responseHeaderTimeout := time.Duration(responseHeaderTimeoutSec) * time.Second
+	kiroHTTPClientPoolMu.RLock()
+	if pooled, ok := kiroHTTPClientPools[poolKey]; ok {
+		kiroHTTPClientPoolMu.RUnlock()
+		return pooled
+	}
+	kiroHTTPClientPoolMu.RUnlock()
 
-		// Clone DefaultTransport to preserve reasonable defaults
-		transport := http.DefaultTransport.(*http.Transport).Clone()
+	connectTimeout := time.Duration(connectTimeoutSec) * time.Second
+	responseHeaderTimeout := time.Duration(responseHeaderTimeoutSec) * time.Second
 
-		// Override connection pool settings for Kiro
-		transport.MaxIdleConns = 100                 // Max idle connections across all hosts
-		transport.MaxIdleConnsPerHost = 20           // Max idle connections per host
-		transport.MaxConnsPerHost = 50               // Max total connections per host
-		transport.IdleConnTimeout = 90 * time.Second // How long idle connections stay in pool
+	// Clone DefaultTransport to preserve reasonable defaults
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	applyTransportTLSInsecureSkipVerify(transport, insecureSkipVerify)
 
-		// Apply connect timeout from config
-		transport.DialContext = (&net.Dialer{
-			Timeout:   connectTimeout,
-			KeepAlive: 30 * time.Second, // TCP keep-alive interval
-		}).DialContext
+	// Override connection pool settings for Kiro
+	transport.MaxIdleConns = 100                 // Max idle connections across all hosts
+	transport.MaxIdleConnsPerHost = 20           // Max idle connections per host
+	transport.MaxConnsPerHost = 50               // Max total connections per host
+	transport.IdleConnTimeout = 90 * time.Second // How long idle connections stay in pool
 
-		// Apply response header timeout from config
-		transport.ResponseHeaderTimeout = responseHeaderTimeout
+	// Apply connect timeout from config
+	transport.DialContext = (&net.Dialer{
+		Timeout:   connectTimeout,
+		KeepAlive: 30 * time.Second, // TCP keep-alive interval
+	}).DialContext
 
-		// Expect 100-continue timeout
-		transport.ExpectContinueTimeout = 1 * time.Second
+	// Apply response header timeout from config
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
 
-		// Enable HTTP/2 when available
-		transport.ForceAttemptHTTP2 = true
+	// Expect 100-continue timeout
+	transport.ExpectContinueTimeout = 1 * time.Second
 
-		kiroHTTPClientPool = &http.Client{
-			Transport: transport,
-			// No global timeout - let individual requests set their own timeouts via context
-		}
+	// Enable HTTP/2 when available
+	transport.ForceAttemptHTTP2 = true
 
-		log.Debugf("kiro: initialized pooled HTTP client (connect=%v, response-header=%v, MaxIdleConns=%d, MaxIdleConnsPerHost=%d, MaxConnsPerHost=%d)",
-			connectTimeout, responseHeaderTimeout, transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxConnsPerHost)
-	})
+	pooledClient := &http.Client{
+		Transport: transport,
+		// No global timeout - let individual requests set their own timeouts via context
+	}
 
-	return kiroHTTPClientPool
+	kiroHTTPClientPoolMu.Lock()
+	if pooled, ok := kiroHTTPClientPools[poolKey]; ok {
+		kiroHTTPClientPoolMu.Unlock()
+		return pooled
+	}
+	kiroHTTPClientPools[poolKey] = pooledClient
+	kiroHTTPClientPoolMu.Unlock()
+
+	log.Debugf("kiro: initialized pooled HTTP client (connect=%v, response-header=%v, insecureSkipVerify=%v, MaxIdleConns=%d, MaxIdleConnsPerHost=%d, MaxConnsPerHost=%d)",
+		connectTimeout, responseHeaderTimeout, insecureSkipVerify, transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxConnsPerHost)
+
+	return pooledClient
 }
 
 // newKiroHTTPClientWithPooling creates an HTTP client that uses connection pooling when appropriate.

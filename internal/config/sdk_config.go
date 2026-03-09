@@ -9,6 +9,10 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// TLSInsecureSkipVerify disables upstream TLS certificate verification when true.
+	// WARNING: This is insecure and should only be used in controlled environments.
+	TLSInsecureSkipVerify bool `yaml:"tls-insecure-skip-verify" json:"tls-insecure-skip-verify"`
+
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.

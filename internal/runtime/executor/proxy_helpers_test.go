@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 func TestIsTimeoutError_Nil(t *testing.T) {
@@ -172,7 +175,7 @@ func TestBuildDefaultTransportWithTimeouts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := buildDefaultTransportWithTimeouts(tt.connectTimeoutSec, tt.responseHeaderTimeoutSec)
+			transport := buildDefaultTransportWithTimeouts(tt.connectTimeoutSec, tt.responseHeaderTimeoutSec, false)
 			if transport == nil {
 				t.Fatal("expected non-nil transport")
 			}
@@ -187,27 +190,37 @@ func TestBuildDefaultTransportWithTimeouts(t *testing.T) {
 	}
 }
 
+func TestBuildDefaultTransportWithTimeouts_SetsInsecureSkipVerify(t *testing.T) {
+	transport := buildDefaultTransportWithTimeouts(10, 30, true)
+	if transport == nil {
+		t.Fatal("expected non-nil transport")
+	}
+	if transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatalf("expected InsecureSkipVerify=true, got %#v", transport.TLSClientConfig)
+	}
+}
+
 func TestBuildProxyTransport_InvalidURL(t *testing.T) {
-	transport := buildProxyTransport("", 10, 30)
+	transport := buildProxyTransport("", 10, 30, false)
 	if transport != nil {
 		t.Error("expected nil transport for empty URL")
 	}
 
-	transport = buildProxyTransport("://invalid", 10, 30)
+	transport = buildProxyTransport("://invalid", 10, 30, false)
 	if transport != nil {
 		t.Error("expected nil transport for invalid URL")
 	}
 }
 
 func TestBuildProxyTransport_UnsupportedScheme(t *testing.T) {
-	transport := buildProxyTransport("ftp://proxy.example.com:8080", 10, 30)
+	transport := buildProxyTransport("ftp://proxy.example.com:8080", 10, 30, false)
 	if transport != nil {
 		t.Error("expected nil transport for unsupported scheme")
 	}
 }
 
 func TestBuildProxyTransport_HTTPProxy(t *testing.T) {
-	transport := buildProxyTransport("http://proxy.example.com:8080", 10, 30)
+	transport := buildProxyTransport("http://proxy.example.com:8080", 10, 30, false)
 	if transport == nil {
 		t.Fatal("expected non-nil transport for HTTP proxy")
 	}
@@ -220,7 +233,7 @@ func TestBuildProxyTransport_HTTPProxy(t *testing.T) {
 }
 
 func TestBuildProxyTransport_HTTPSProxy(t *testing.T) {
-	transport := buildProxyTransport("https://proxy.example.com:8080", 15, 45)
+	transport := buildProxyTransport("https://proxy.example.com:8080", 15, 45, false)
 	if transport == nil {
 		t.Fatal("expected non-nil transport for HTTPS proxy")
 	}
@@ -232,9 +245,19 @@ func TestBuildProxyTransport_HTTPSProxy(t *testing.T) {
 	}
 }
 
+func TestBuildProxyTransport_HTTPProxy_SetsInsecureSkipVerify(t *testing.T) {
+	transport := buildProxyTransport("http://proxy.example.com:8080", 10, 30, true)
+	if transport == nil {
+		t.Fatal("expected non-nil transport for HTTP proxy")
+	}
+	if transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatalf("expected proxy transport InsecureSkipVerify=true, got %#v", transport.TLSClientConfig)
+	}
+}
+
 func TestBuildProxyTransport_SOCKS5Proxy(t *testing.T) {
 	// Note: This test only verifies the transport is created, not that SOCKS5 actually works
-	transport := buildProxyTransport("socks5://proxy.example.com:1080", 10, 30)
+	transport := buildProxyTransport("socks5://proxy.example.com:1080", 10, 30, false)
 	if transport == nil {
 		t.Fatal("expected non-nil transport for SOCKS5 proxy")
 	}
@@ -247,7 +270,7 @@ func TestBuildProxyTransport_SOCKS5Proxy(t *testing.T) {
 }
 
 func TestBuildProxyTransport_SOCKS5WithAuth(t *testing.T) {
-	transport := buildProxyTransport("socks5://user:pass@proxy.example.com:1080", 10, 30)
+	transport := buildProxyTransport("socks5://user:pass@proxy.example.com:1080", 10, 30, false)
 	if transport == nil {
 		t.Fatal("expected non-nil transport for SOCKS5 proxy with auth")
 	}
@@ -258,7 +281,7 @@ func TestBuildProxyTransport_SOCKS5WithAuth(t *testing.T) {
 
 func TestBuildProxyTransport_ZeroTimeouts(t *testing.T) {
 	// Test with zero timeouts - should use fallback for SOCKS5
-	transport := buildProxyTransport("socks5://proxy.example.com:1080", 0, 0)
+	transport := buildProxyTransport("socks5://proxy.example.com:1080", 0, 0, false)
 	if transport == nil {
 		t.Fatal("expected non-nil transport")
 	}
@@ -270,7 +293,7 @@ func TestBuildProxyTransport_ZeroTimeouts(t *testing.T) {
 
 // TestDialContextTimeout verifies that the custom DialContext respects timeout
 func TestDialContextTimeout(t *testing.T) {
-	transport := buildDefaultTransportWithTimeouts(1, 30) // 1 second connect timeout
+	transport := buildDefaultTransportWithTimeouts(1, 30, false) // 1 second connect timeout
 	if transport == nil || transport.DialContext == nil {
 		t.Fatal("expected transport with DialContext")
 	}
@@ -295,5 +318,31 @@ func TestDialContextTimeout(t *testing.T) {
 	if errors.As(err, &netErr) && !netErr.Timeout() {
 		// Some systems may return different errors, so we just log
 		t.Logf("dial error (may not be timeout on all systems): %v", err)
+	}
+}
+
+func TestNewProxyAwareHTTPClient_CacheKeyIncludesTLSInsecureSwitch(t *testing.T) {
+	httpClientCacheMutex.Lock()
+	httpClientCache = make(map[string]*http.Client)
+	httpClientCacheMutex.Unlock()
+
+	cfgInsecure := &config.Config{SDKConfig: config.SDKConfig{TLSInsecureSkipVerify: true}}
+	clientInsecure := newProxyAwareHTTPClient(context.Background(), cfgInsecure, nil, 0)
+	transportInsecure, okInsecure := clientInsecure.Transport.(*http.Transport)
+	if !okInsecure || transportInsecure == nil {
+		t.Fatalf("expected *http.Transport for insecure client, got %T", clientInsecure.Transport)
+	}
+	if transportInsecure.TLSClientConfig == nil || !transportInsecure.TLSClientConfig.InsecureSkipVerify {
+		t.Fatalf("expected insecure transport, got %#v", transportInsecure.TLSClientConfig)
+	}
+
+	cfgStrict := &config.Config{SDKConfig: config.SDKConfig{TLSInsecureSkipVerify: false}}
+	clientStrict := newProxyAwareHTTPClient(context.Background(), cfgStrict, nil, 0)
+	transportStrict, okStrict := clientStrict.Transport.(*http.Transport)
+	if !okStrict || transportStrict == nil {
+		t.Fatalf("expected *http.Transport for strict client, got %T", clientStrict.Transport)
+	}
+	if transportStrict.TLSClientConfig == nil || transportStrict.TLSClientConfig.InsecureSkipVerify {
+		t.Fatalf("expected strict transport, got %#v", transportStrict.TLSClientConfig)
 	}
 }
