@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -25,9 +26,10 @@ import (
 )
 
 const (
-	githubCopilotBaseURL       = "https://api.githubcopilot.com"
+	githubCopilotBaseURL       = "https://api.business.githubcopilot.com"
 	githubCopilotChatPath      = "/chat/completions"
 	githubCopilotResponsesPath = "/responses"
+	githubCopilotMessagesPath  = "/v1/messages"
 	githubCopilotAuthType      = "github-copilot"
 	githubCopilotTokenCacheTTL = 25 * time.Minute
 	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
@@ -36,12 +38,13 @@ const (
 	maxScannerBufferSize = 20_971_520
 
 	// Copilot API header values.
-	copilotUserAgent     = "GitHubCopilotChat/0.35.0"
-	copilotEditorVersion = "vscode/1.107.0"
-	copilotPluginVersion = "copilot-chat/0.35.0"
+	copilotUserAgent     = "GitHubCopilotChat/0.38.2"
+	copilotEditorVersion = "vscode/1.110.1"
+	copilotPluginVersion = "copilot-chat/0.38.2"
 	copilotIntegrationID = "vscode-chat"
-	copilotOpenAIIntent  = "conversation-panel"
-	copilotGitHubAPIVer  = "2025-04-01"
+	copilotOpenAIIntent  = "conversation-agent"
+	copilotGitHubAPIVer  = "2025-10-01"
+	copilotAnthropicBeta = "advanced-tool-use-2025-11-20"
 )
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
@@ -82,7 +85,8 @@ func (e *GitHubCopilotExecutor) PrepareRequest(req *http.Request, auth *cliproxy
 	if errToken != nil {
 		return errToken
 	}
-	e.applyHeaders(req, apiToken, nil)
+	useMessages := req.URL != nil && strings.HasPrefix(req.URL.Path, githubCopilotMessagesPath)
+	e.applyHeaders(req, apiToken, nil, false, useMessages)
 	return nil
 }
 
@@ -113,9 +117,12 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
+	useMessages := useGitHubCopilotMessagesEndpoint(from, req.Model)
 	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
 	to := sdktranslator.FromString("openai")
-	if useResponses {
+	if useMessages {
+		to = sdktranslator.FromString("claude")
+	} else if useResponses {
 		to = sdktranslator.FromString("openai-response")
 	}
 	originalPayload := bytes.Clone(req.Payload)
@@ -125,13 +132,17 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	body = e.normalizeModel(req.Model, body)
-	body = flattenAssistantContent(body)
+	if !useMessages {
+		body = flattenAssistantContent(body)
+	}
 
 	// Detect vision content before input normalization removes messages
 	hasVision := detectVisionContent(body)
 
 	thinkingProvider := "openai"
-	if useResponses {
+	if useMessages {
+		thinkingProvider = "claude"
+	} else if useResponses {
 		thinkingProvider = "codex"
 	}
 	body, err = applyThinkingWithUsageMeta(body, req.Model, from.String(), thinkingProvider, e.Identifier(), reporter)
@@ -139,7 +150,9 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 		return resp, err
 	}
 
-	if useResponses {
+	if useMessages {
+		// Claude /v1/messages keeps original structure; no OpenAI tool/input normalization.
+	} else if useResponses {
 		body = normalizeGitHubCopilotResponsesInput(body)
 		body = normalizeGitHubCopilotResponsesTools(body)
 	} else {
@@ -149,16 +162,13 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "stream", false)
 
-	path := githubCopilotChatPath
-	if useResponses {
-		path = githubCopilotResponsesPath
-	}
+	path := selectGitHubCopilotEndpoint(from, req.Model)
 	url := baseURL + path
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
 	}
-	e.applyHeaders(httpReq, apiToken, body)
+	e.applyHeaders(httpReq, apiToken, body, false, useMessages)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
@@ -213,7 +223,9 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	appendAPIResponseChunk(ctx, e.cfg, data)
 
 	detail := parseOpenAIUsage(data)
-	if useResponses && detail.TotalTokens == 0 {
+	if useMessages {
+		detail = parseClaudeUsage(data)
+	} else if useResponses && detail.TotalTokens == 0 {
 		detail = parseOpenAIResponsesUsage(data)
 	}
 	if detail.TotalTokens > 0 {
@@ -243,9 +255,12 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
+	useMessages := useGitHubCopilotMessagesEndpoint(from, req.Model)
 	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
 	to := sdktranslator.FromString("openai")
-	if useResponses {
+	if useMessages {
+		to = sdktranslator.FromString("claude")
+	} else if useResponses {
 		to = sdktranslator.FromString("openai-response")
 	}
 	originalPayload := bytes.Clone(req.Payload)
@@ -255,13 +270,17 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	body = e.normalizeModel(req.Model, body)
-	body = flattenAssistantContent(body)
+	if !useMessages {
+		body = flattenAssistantContent(body)
+	}
 
 	// Detect vision content before input normalization removes messages
 	hasVision := detectVisionContent(body)
 
 	thinkingProvider := "openai"
-	if useResponses {
+	if useMessages {
+		thinkingProvider = "claude"
+	} else if useResponses {
 		thinkingProvider = "codex"
 	}
 	body, err = applyThinkingWithUsageMeta(body, req.Model, from.String(), thinkingProvider, e.Identifier(), reporter)
@@ -269,7 +288,9 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		return nil, err
 	}
 
-	if useResponses {
+	if useMessages {
+		// Claude /v1/messages keeps original structure; no OpenAI tool/input normalization.
+	} else if useResponses {
 		body = normalizeGitHubCopilotResponsesInput(body)
 		body = normalizeGitHubCopilotResponsesTools(body)
 	} else {
@@ -279,20 +300,17 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	// Enable stream options for usage stats in stream
-	if !useResponses {
+	if shouldIncludeGitHubCopilotStreamUsage(useResponses, useMessages) {
 		body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
 	}
 
-	path := githubCopilotChatPath
-	if useResponses {
-		path = githubCopilotResponsesPath
-	}
+	path := selectGitHubCopilotEndpoint(from, req.Model)
 	url := baseURL + path
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	e.applyHeaders(httpReq, apiToken, body)
+	e.applyHeaders(httpReq, apiToken, body, true, useMessages)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
@@ -365,7 +383,11 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				if bytes.Equal(data, []byte("[DONE]")) {
 					continue
 				}
-				if detail, ok := parseOpenAIStreamUsage(line); ok {
+				if useMessages {
+					if detail, ok := parseClaudeStreamUsage(line); ok {
+						reporter.publish(ctx, detail)
+					}
+				} else if detail, ok := parseOpenAIStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
 				} else if useResponses {
 					if detail, ok := parseOpenAIResponsesStreamUsage(line); ok {
@@ -478,10 +500,19 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 }
 
 // applyHeaders sets the required headers for GitHub Copilot API requests.
-func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, body []byte) {
+func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, body []byte, stream bool, useMessages bool) {
+	var ginHeaders http.Header
+	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		ginHeaders = ginCtx.Request.Header
+	}
+
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+apiToken)
-	r.Header.Set("Accept", "application/json")
+	if stream {
+		r.Header.Set("Accept", "text/event-stream")
+	} else {
+		r.Header.Set("Accept", "application/json")
+	}
 	r.Header.Set("User-Agent", copilotUserAgent)
 	r.Header.Set("Editor-Version", copilotEditorVersion)
 	r.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
@@ -489,48 +520,105 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
 	r.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
 	r.Header.Set("X-Github-Api-Version", copilotGitHubAPIVer)
 	r.Header.Set("X-Request-Id", uuid.NewString())
+	if useMessages {
+		r.Header.Set("Anthropic-Beta", copilotAnthropicBeta)
+	} else {
+		r.Header.Del("Anthropic-Beta")
+	}
+
+	forwardHeaders := []string{
+		"Vscode-Abexpcontext",
+		"Vscode-Machineid",
+		"Vscode-Sessionid",
+		"X-Agent-Task-Id",
+		"X-Interaction-Id",
+		"X-Interaction-Type",
+		"X-Vscode-User-Agent-Library-Version",
+		"Sec-Fetch-Site",
+		"Sec-Fetch-Mode",
+		"Sec-Fetch-Dest",
+		"Priority",
+		"Accept-Encoding",
+		"X-Request-Id",
+	}
+	if ginHeaders != nil {
+		for _, key := range forwardHeaders {
+			if v := strings.TrimSpace(ginHeaders.Get(key)); v != "" {
+				r.Header.Set(key, v)
+			}
+		}
+		if useMessages {
+			if v := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); v != "" {
+				r.Header.Set("Anthropic-Beta", v)
+			}
+		}
+	}
+
+	if strings.TrimSpace(r.Header.Get("X-Agent-Task-Id")) == "" {
+		if requestID := strings.TrimSpace(r.Header.Get("X-Request-Id")); requestID != "" {
+			r.Header.Set("X-Agent-Task-Id", requestID)
+		}
+	}
 
 	initiator := "user"
-	if role := detectLastConversationRole(body); role == "assistant" || role == "tool" {
+	if containsAgentConversationRole(body) {
 		initiator = "agent"
 	}
 	r.Header.Set("X-Initiator", initiator)
 }
 
-func detectLastConversationRole(body []byte) string {
+func selectGitHubCopilotEndpoint(sourceFormat sdktranslator.Format, model string) string {
+	if useGitHubCopilotMessagesEndpoint(sourceFormat, model) {
+		return githubCopilotMessagesPath
+	}
+	if useGitHubCopilotResponsesEndpoint(sourceFormat, model) {
+		return githubCopilotResponsesPath
+	}
+	return githubCopilotChatPath
+}
+
+func useGitHubCopilotMessagesEndpoint(_ sdktranslator.Format, model string) bool {
+	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
+	return strings.Contains(baseModel, "claude")
+}
+
+func shouldIncludeGitHubCopilotStreamUsage(useResponses, useMessages bool) bool {
+	return !useResponses && !useMessages
+}
+
+func containsAgentConversationRole(body []byte) bool {
 	if len(body) == 0 {
-		return ""
+		return false
 	}
 
 	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
-		arr := messages.Array()
-		for i := len(arr) - 1; i >= 0; i-- {
-			if role := arr[i].Get("role").String(); role != "" {
-				return role
+		for _, item := range messages.Array() {
+			role := strings.TrimSpace(strings.ToLower(item.Get("role").String()))
+			if role == "assistant" || role == "tool" {
+				return true
 			}
 		}
 	}
 
 	if inputs := gjson.GetBytes(body, "input"); inputs.Exists() && inputs.IsArray() {
-		arr := inputs.Array()
-		for i := len(arr) - 1; i >= 0; i-- {
-			item := arr[i]
+		for _, item := range inputs.Array() {
 
 			// Most Responses input items carry a top-level role.
-			if role := item.Get("role").String(); role != "" {
-				return role
+			role := strings.TrimSpace(strings.ToLower(item.Get("role").String()))
+			if role == "assistant" || role == "tool" {
+				return true
 			}
 
-			switch item.Get("type").String() {
+			switch strings.TrimSpace(strings.ToLower(item.Get("type").String())) {
 			case "function_call", "function_call_arguments":
-				return "assistant"
+				return true
 			case "function_call_output", "function_call_response", "tool_result":
-				return "tool"
+				return true
 			}
 		}
 	}
 
-	return ""
+	return false
 }
 
 // detectVisionContent checks if the request body contains vision/image content.

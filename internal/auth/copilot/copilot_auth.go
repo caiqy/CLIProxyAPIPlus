@@ -21,14 +21,14 @@ const (
 	// copilotAPITokenURL is the endpoint for getting Copilot API tokens from GitHub token.
 	copilotAPITokenURL = "https://api.github.com/copilot_internal/v2/token"
 	// copilotAPIEndpoint is the base URL for making API requests.
-	copilotAPIEndpoint = "https://api.githubcopilot.com"
+	copilotAPIEndpoint = "https://api.business.githubcopilot.com"
 
 	// Common HTTP header values for Copilot API requests.
-	copilotUserAgent       = "GithubCopilot/1.0"
-	copilotEditorVersion   = "vscode/1.100.0"
-	copilotPluginVersion   = "copilot/1.300.0"
-	copilotIntegrationID   = "vscode-chat"
-	copilotOpenAIIntent    = "conversation-panel"
+	copilotUserAgent     = "GitHubCopilotChat/0.38.2"
+	copilotEditorVersion = "vscode/1.110.1"
+	copilotPluginVersion = "copilot-chat/0.38.2"
+	copilotIntegrationID = "vscode-chat"
+	copilotOpenAIIntent  = "conversation-agent"
 )
 
 // CopilotAPIToken represents the Copilot API token response.
@@ -246,9 +246,9 @@ const maxModelsResponseSize = 2 * 1024 * 1024
 
 // allowedCopilotAPIHosts is the set of hosts that are considered safe for Copilot API requests.
 var allowedCopilotAPIHosts = map[string]bool{
-	"api.githubcopilot.com":          true,
-	"api.individual.githubcopilot.com": true,
-	"api.business.githubcopilot.com":   true,
+	"api.githubcopilot.com":               true,
+	"api.individual.githubcopilot.com":    true,
+	"api.business.githubcopilot.com":      true,
 	"copilot-proxy.githubusercontent.com": true,
 }
 

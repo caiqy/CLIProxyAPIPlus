@@ -211,3 +211,28 @@ func TestGitHubUserInfo_Struct(t *testing.T) {
 		t.Error("GitHubUserInfo fields should not be empty")
 	}
 }
+
+func TestCopilotAuthGetAPIEndpoint_BusinessDefault(t *testing.T) {
+	auth := &CopilotAuth{}
+	if got := auth.GetAPIEndpoint(); got != "https://api.business.githubcopilot.com" {
+		t.Fatalf("GetAPIEndpoint() = %q, want https://api.business.githubcopilot.com", got)
+	}
+}
+
+func TestMakeAuthenticatedRequest_UsesLatestCopilotHeaders(t *testing.T) {
+	auth := &CopilotAuth{}
+	apiToken := &CopilotAPIToken{Token: "copilot-token"}
+	req, err := auth.MakeAuthenticatedRequest(context.Background(), http.MethodPost, "https://example.com/v1/messages", nil, apiToken)
+	if err != nil {
+		t.Fatalf("MakeAuthenticatedRequest() error = %v", err)
+	}
+	if got := req.Header.Get("Openai-Intent"); got != "conversation-agent" {
+		t.Fatalf("Openai-Intent = %q, want conversation-agent", got)
+	}
+	if got := req.Header.Get("Editor-Version"); got != "vscode/1.110.1" {
+		t.Fatalf("Editor-Version = %q, want vscode/1.110.1", got)
+	}
+	if got := req.Header.Get("Editor-Plugin-Version"); got != "copilot-chat/0.38.2" {
+		t.Fatalf("Editor-Plugin-Version = %q, want copilot-chat/0.38.2", got)
+	}
+}
