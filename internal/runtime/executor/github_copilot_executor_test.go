@@ -1,16 +1,26 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+type testRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestGitHubCopilotNormalizeModel_StripsSuffix(t *testing.T) {
 	t.Parallel()
@@ -70,6 +80,13 @@ func TestUseGitHubCopilotResponsesEndpoint_CodexModel(t *testing.T) {
 	t.Parallel()
 	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5-codex") {
 		t.Fatal("expected codex model to use /responses")
+	}
+}
+
+func TestUseGitHubCopilotResponsesEndpoint_ResponsesOnlyStaticModel(t *testing.T) {
+	t.Parallel()
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
+		t.Fatal("expected responses-only static model to use /responses")
 	}
 }
 
@@ -524,29 +541,6 @@ func TestApplyHeaders_XInitiator_NotForwardedFromIncomingRequest(t *testing.T) {
 	}
 }
 
-func TestShouldIncludeGitHubCopilotStreamUsage(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name         string
-		useResponses bool
-		useMessages  bool
-		want         bool
-	}{
-		{name: "chat-completions", useResponses: false, useMessages: false, want: true},
-		{name: "responses", useResponses: true, useMessages: false, want: false},
-		{name: "messages", useResponses: false, useMessages: true, want: false},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := shouldIncludeGitHubCopilotStreamUsage(tc.useResponses, tc.useMessages); got != tc.want {
-				t.Fatalf("shouldIncludeGitHubCopilotStreamUsage(%v, %v) = %v, want %v", tc.useResponses, tc.useMessages, got, tc.want)
-			}
-		})
-	}
-}
-
 // --- Tests for vision detection (Problem P) ---
 
 func TestDetectVisionContent_WithImageURL(t *testing.T) {
@@ -579,5 +573,60 @@ func TestDetectVisionContent_NoMessages(t *testing.T) {
 	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	if detectVisionContent(body) {
 		t.Fatal("expected no vision content when messages field is absent")
+	}
+}
+
+// TestChatCompletionsBodyDoesNotInjectStreamOptions verifies the actual
+// ExecuteStream production path does not inject stream_options into a
+// chat/completions upstream request body.
+func TestChatCompletionsBodyDoesNotInjectStreamOptions(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		var err error
+		capturedBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		}, nil
+	}))
+
+	e := NewGitHubCopilotExecutor(&config.Config{SDKConfig: config.SDKConfig{UpstreamTimeouts: config.UpstreamTimeouts{
+		ConnectTimeoutSeconds:        17,
+		ResponseHeaderTimeoutSeconds: 47,
+	}}})
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
+	stream, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for range stream.Chunks {
+	}
+
+	if len(capturedBody) == 0 {
+		t.Fatal("expected upstream request body to be captured")
+	}
+	if !gjson.GetBytes(capturedBody, "stream").Bool() {
+		t.Fatalf("stream = %s, want true", gjson.GetBytes(capturedBody, "stream").Raw)
+	}
+	if gjson.GetBytes(capturedBody, "stream_options").Exists() {
+		t.Fatalf("chat/completions body must NOT contain stream_options, got: %s", capturedBody)
 	}
 }

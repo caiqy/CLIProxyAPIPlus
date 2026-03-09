@@ -29,6 +29,7 @@ const (
 	copilotPluginVersion = "copilot-chat/0.38.2"
 	copilotIntegrationID = "vscode-chat"
 	copilotOpenAIIntent  = "conversation-agent"
+	modelAccessIntent    = "model-access"
 )
 
 // CopilotAPIToken represents the Copilot API token response.
@@ -206,8 +207,8 @@ func (c *CopilotAuth) GetAPIEndpoint() string {
 }
 
 // MakeAuthenticatedRequest creates an authenticated HTTP request to the Copilot API.
-func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, url string, body io.Reader, apiToken *CopilotAPIToken) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, requestURL string, body io.Reader, apiToken *CopilotAPIToken) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -218,10 +219,21 @@ func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, url 
 	req.Header.Set("User-Agent", copilotUserAgent)
 	req.Header.Set("Editor-Version", copilotEditorVersion)
 	req.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
-	req.Header.Set("Openai-Intent", copilotOpenAIIntent)
+	req.Header.Set("Openai-Intent", copilotIntentForRequestURL(requestURL))
 	req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
 
 	return req, nil
+}
+
+func copilotIntentForRequestURL(requestURL string) string {
+	parsed, err := url.Parse(requestURL)
+	if err == nil {
+		path := strings.TrimRight(parsed.Path, "/")
+		if path == "/models" {
+			return modelAccessIntent
+		}
+	}
+	return copilotOpenAIIntent
 }
 
 // CopilotModelEntry represents a single model entry returned by the Copilot /models API.

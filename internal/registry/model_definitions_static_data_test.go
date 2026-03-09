@@ -35,3 +35,44 @@ func TestGetAntigravityModelConfig_Gemini31SupportsThinkingLevels(t *testing.T) 
 		})
 	}
 }
+
+func TestGetGitHubCopilotModels_IncludesGPT54(t *testing.T) {
+	models := GetGitHubCopilotModels()
+	var target *ModelInfo
+	for _, m := range models {
+		if m != nil && m.ID == "gpt-5.4" {
+			target = m
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("expected static GitHub Copilot models to include gpt-5.4")
+	}
+	if len(target.SupportedEndpoints) != 1 || target.SupportedEndpoints[0] != "/responses" {
+		t.Fatalf("gpt-5.4 supported_endpoints = %v, want [/responses]", target.SupportedEndpoints)
+	}
+}
+
+func TestGetGitHubCopilotModels_IncludesExactIDsFromModelsAPI(t *testing.T) {
+	models := GetGitHubCopilotModels()
+	index := make(map[string]struct{}, len(models))
+	for _, m := range models {
+		if m != nil {
+			index[m.ID] = struct{}{}
+		}
+	}
+
+	wantIDs := []string{
+		"gpt-4.1-2025-04-14",
+		"gpt-4o-mini-2024-07-18",
+		"gpt-41-copilot",
+		"text-embedding-3-small",
+		"text-embedding-3-small-inference",
+	}
+
+	for _, wantID := range wantIDs {
+		if _, ok := index[wantID]; !ok {
+			t.Fatalf("expected static GitHub Copilot models to include %s", wantID)
+		}
+	}
+}

@@ -299,10 +299,6 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	// Enable stream options for usage stats in stream
-	if shouldIncludeGitHubCopilotStreamUsage(useResponses, useMessages) {
-		body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
-	}
 
 	path := selectGitHubCopilotEndpoint(from, req.Model)
 	url := baseURL + path
@@ -582,10 +578,6 @@ func useGitHubCopilotMessagesEndpoint(_ sdktranslator.Format, model string) bool
 	return strings.Contains(baseModel, "claude")
 }
 
-func shouldIncludeGitHubCopilotStreamUsage(useResponses, useMessages bool) bool {
-	return !useResponses && !useMessages
-}
-
 func containsAgentConversationRole(body []byte) bool {
 	if len(body) == 0 {
 		return false
@@ -665,7 +657,16 @@ func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model 
 		return true
 	}
 	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
-	return strings.Contains(baseModel, "codex")
+	if strings.Contains(baseModel, "codex") {
+		return true
+	}
+	for _, info := range registry.GetGitHubCopilotModels() {
+		if info == nil || !strings.EqualFold(info.ID, baseModel) {
+			continue
+		}
+		return len(info.SupportedEndpoints) == 1 && info.SupportedEndpoints[0] == githubCopilotResponsesPath
+	}
+	return false
 }
 
 // flattenAssistantContent converts assistant message content from array format
