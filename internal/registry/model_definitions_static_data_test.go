@@ -99,3 +99,74 @@ func TestGetGitHubCopilotModels_ExcludesObsoleteIDs(t *testing.T) {
 		}
 	}
 }
+
+func TestGetGitHubCopilotModels_ClaudeSonnet45SupportsThinking(t *testing.T) {
+	models := GetGitHubCopilotModels()
+	var target *ModelInfo
+	for _, m := range models {
+		if m != nil && m.ID == "claude-sonnet-4.5" {
+			target = m
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("claude-sonnet-4.5 not found in copilot models")
+	}
+	if target.Thinking == nil {
+		t.Fatal("claude-sonnet-4.5 should support thinking")
+	}
+	if len(target.Thinking.Levels) == 0 {
+		t.Fatal("claude-sonnet-4.5 thinking levels should not be empty")
+	}
+}
+
+func TestGetGitHubCopilotModels_ClaudeOpus45SupportsThinking(t *testing.T) {
+	models := GetGitHubCopilotModels()
+	var target *ModelInfo
+	for _, m := range models {
+		if m != nil && m.ID == "claude-opus-4.5" {
+			target = m
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("claude-opus-4.5 not found in copilot models")
+	}
+	if target.Thinking == nil {
+		t.Fatal("claude-opus-4.5 should support thinking")
+	}
+}
+
+func TestGetGitHubCopilotModels_ClaudeHaiku45SupportsThinking(t *testing.T) {
+	models := GetGitHubCopilotModels()
+	var target *ModelInfo
+	for _, m := range models {
+		if m != nil && m.ID == "claude-haiku-4.5" {
+			target = m
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("claude-haiku-4.5 not found in copilot models")
+	}
+	if target.Thinking == nil {
+		t.Fatal("claude-haiku-4.5 should support thinking")
+	}
+}
+
+func TestGetGitHubCopilotModels_ClaudeSonnet4SupportsThinking(t *testing.T) {
+	models := GetGitHubCopilotModels()
+	var target *ModelInfo
+	for _, m := range models {
+		if m != nil && m.ID == "claude-sonnet-4" {
+			target = m
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("claude-sonnet-4 not found in copilot models")
+	}
+	if target.Thinking == nil {
+		t.Fatal("claude-sonnet-4 should support thinking")
+	}
+}
