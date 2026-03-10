@@ -776,8 +776,14 @@ func TestGitHubCopilotExecute_BetasExtractedFromBodyIntoHeader(t *testing.T) {
 	t.Parallel()
 
 	var capturedHeaders http.Header
+	var capturedBody []byte
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
 		capturedHeaders = req.Header.Clone()
+		var err error
+		capturedBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -807,9 +813,14 @@ func TestGitHubCopilotExecute_BetasExtractedFromBodyIntoHeader(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
+	// 验证 betas 字段已从 body 提取到 header
 	betaHeader := capturedHeaders.Get("Anthropic-Beta")
 	if !strings.Contains(betaHeader, "files-api-2025-04-14") {
 		t.Fatalf("Anthropic-Beta = %q, want to contain files-api-2025-04-14 (extracted from body)", betaHeader)
+	}
+	// 验证 betas 字段已从请求体中移除（不能同时出现在 body 和 header）
+	if gjson.GetBytes(capturedBody, "betas").Exists() {
+		t.Fatalf("request body still contains 'betas' field after extraction: %s", capturedBody)
 	}
 }
 
@@ -858,5 +869,82 @@ func TestGitHubCopilotExecute_ThinkingDisabledWhenToolChoiceForced(t *testing.T)
 		if thinkingType == "enabled" || thinkingType == "adaptive" {
 			t.Fatalf("thinking should be absent or disabled when tool_choice forces tool use, got thinking=%s", thinkingResult.Raw)
 		}
+	}
+}
+
+func TestGitHubCopilotExecuteStream_BetasExtractedFromBodyIntoHeader(t *testing.T) {
+	t.Parallel()
+
+	// Minimal SSE response in Claude messages format
+	upstream := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4.6","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
+		"",
+		"event: content_block_start",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		"",
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		"",
+		"event: content_block_stop",
+		`data: {"type":"content_block_stop","index":0}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+
+	var capturedHeaders http.Header
+	var capturedBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		capturedHeaders = req.Header.Clone()
+		var err error
+		capturedBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstream)),
+		}, nil
+	}))
+
+	e := NewGitHubCopilotExecutor(&config.Config{SDKConfig: config.SDKConfig{UpstreamTimeouts: config.UpstreamTimeouts{
+		ConnectTimeoutSeconds: 13, ResponseHeaderTimeoutSeconds: 43,
+	}}})
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	// payload 中包含 betas 字段
+	payload := []byte(`{"model":"claude-opus-4.6","max_tokens":128,"messages":[{"role":"user","content":"hi"}],"betas":["files-api-2025-04-14"]}`)
+
+	stream, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4.6",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	// 消耗所有流数据以确保请求已完成
+	for range stream.Chunks {
+	}
+
+	// 验证 betas 字段已从 body 提取到 header
+	betaHeader := capturedHeaders.Get("Anthropic-Beta")
+	if !strings.Contains(betaHeader, "files-api-2025-04-14") {
+		t.Fatalf("Anthropic-Beta = %q, want to contain files-api-2025-04-14 (extracted from body)", betaHeader)
+	}
+	// 验证 betas 字段已从请求体中移除（不能同时出现在 body 和 header）
+	if gjson.GetBytes(capturedBody, "betas").Exists() {
+		t.Fatalf("request body still contains 'betas' field after extraction: %s", capturedBody)
 	}
 }
