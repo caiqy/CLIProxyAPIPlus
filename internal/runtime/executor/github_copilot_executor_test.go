@@ -954,7 +954,7 @@ func TestGitHubCopilotExecuteStream_BetasExtractedFromBodyIntoHeader(t *testing.
 func TestInjectFakeAssistantMessage_MessagesUserOnly(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	result := injectFakeAssistantMessage(body, "OK.", true, false)
+	result := injectFakeAssistantMessage(body, "OK.", false)
 	msgs := gjson.GetBytes(result, "messages").Array()
 	if len(msgs) != 2 {
 		t.Fatalf("want 2 messages, got %d", len(msgs))
@@ -971,7 +971,7 @@ func TestInjectFakeAssistantMessage_MessagesMultiUser(t *testing.T) {
 	t.Parallel()
 	// [user, user] → [user, assistant, user]
 	body := []byte(`{"messages":[{"role":"user","content":"first"},{"role":"user","content":"second"}]}`)
-	result := injectFakeAssistantMessage(body, "OK.", false, false)
+	result := injectFakeAssistantMessage(body, "OK.", false)
 	msgs := gjson.GetBytes(result, "messages").Array()
 	if len(msgs) != 3 {
 		t.Fatalf("want 3 messages, got %d", len(msgs))
@@ -988,7 +988,7 @@ func TestInjectFakeAssistantMessage_MessagesWithSystem(t *testing.T) {
 	t.Parallel()
 	// [system, user] → [system, assistant, user]
 	body := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}`)
-	result := injectFakeAssistantMessage(body, "OK.", false, false)
+	result := injectFakeAssistantMessage(body, "OK.", false)
 	msgs := gjson.GetBytes(result, "messages").Array()
 	if len(msgs) != 3 {
 		t.Fatalf("want 3 messages, got %d", len(msgs))
@@ -1001,7 +1001,7 @@ func TestInjectFakeAssistantMessage_MessagesWithSystem(t *testing.T) {
 func TestInjectFakeAssistantMessage_CustomContent(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	result := injectFakeAssistantMessage(body, "Understood.", false, false)
+	result := injectFakeAssistantMessage(body, "Understood.", false)
 	msgs := gjson.GetBytes(result, "messages").Array()
 	if got := msgs[0].Get("content").String(); got != "Understood." {
 		t.Fatalf("injected content = %q, want Understood.", got)
@@ -1011,7 +1011,7 @@ func TestInjectFakeAssistantMessage_CustomContent(t *testing.T) {
 func TestInjectFakeAssistantMessage_DefaultContentWhenEmpty(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	result := injectFakeAssistantMessage(body, "", false, false)
+	result := injectFakeAssistantMessage(body, "", false)
 	msgs := gjson.GetBytes(result, "messages").Array()
 	if got := msgs[0].Get("content").String(); got != "OK." {
 		t.Fatalf("injected content = %q, want OK. (default)", got)
@@ -1021,7 +1021,7 @@ func TestInjectFakeAssistantMessage_DefaultContentWhenEmpty(t *testing.T) {
 func TestInjectFakeAssistantMessage_ResponsesInputFormat(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Hi"}]}]}`)
-	result := injectFakeAssistantMessage(body, "OK.", false, true)
+	result := injectFakeAssistantMessage(body, "OK.", true)
 	items := gjson.GetBytes(result, "input").Array()
 	if len(items) != 2 {
 		t.Fatalf("want 2 input items, got %d", len(items))
@@ -1036,7 +1036,7 @@ func TestInjectFakeAssistantMessage_ResponsesInputFormat(t *testing.T) {
 
 func TestInjectFakeAssistantMessage_EmptyBody(t *testing.T) {
 	t.Parallel()
-	result := injectFakeAssistantMessage([]byte{}, "OK.", false, false)
+	result := injectFakeAssistantMessage([]byte{}, "OK.", false)
 	if len(result) != 0 {
 		t.Fatalf("empty body should be returned as-is, got %q", result)
 	}
@@ -1046,7 +1046,7 @@ func TestInjectFakeAssistantMessage_NoUserMessage_AppendsToEnd(t *testing.T) {
 	t.Parallel()
 	// No user message: fallback - append assistant to end
 	body := []byte(`{"messages":[{"role":"system","content":"sys"}]}`)
-	result := injectFakeAssistantMessage(body, "OK.", false, false)
+	result := injectFakeAssistantMessage(body, "OK.", false)
 	msgs := gjson.GetBytes(result, "messages").Array()
 	if len(msgs) != 2 {
 		t.Fatalf("want 2 messages, got %d", len(msgs))
@@ -1060,7 +1060,7 @@ func TestInjectFakeAssistantMessage_XInitiatorBecomesAgent(t *testing.T) {
 	t.Parallel()
 	// After injection, containsAgentConversationRole should return true.
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	injected := injectFakeAssistantMessage(body, "OK.", false, false)
+	injected := injectFakeAssistantMessage(body, "OK.", false)
 	if !containsAgentConversationRole(injected) {
 		t.Fatal("containsAgentConversationRole = false after injection, want true")
 	}

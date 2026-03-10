@@ -199,7 +199,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	// Inject a fake assistant message when force-agent-initiator is enabled and
 	// the request body has no agent role (would otherwise produce X-Initiator: user).
 	if e.cfg.GitHubCopilot.ForceAgentInitiator && !containsAgentConversationRole(body) {
-		body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useMessages, useResponses)
+		body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useResponses)
 	}
 
 	path := selectGitHubCopilotEndpoint(from, req.Model)
@@ -349,7 +349,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	// Inject a fake assistant message when force-agent-initiator is enabled and
 	// the request body has no agent role (would otherwise produce X-Initiator: user).
 	if e.cfg.GitHubCopilot.ForceAgentInitiator && !containsAgentConversationRole(body) {
-		body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useMessages, useResponses)
+		body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useResponses)
 	}
 
 	path := selectGitHubCopilotEndpoint(from, req.Model)
@@ -705,7 +705,7 @@ const fakeAssistantContentDefault = "OK."
 // Supported body shapes:
 //   - messages[] — used by /chat/completions and /v1/messages
 //   - input[]    — used by /responses (useResponses=true)
-func injectFakeAssistantMessage(body []byte, content string, _, useResponses bool) []byte {
+func injectFakeAssistantMessage(body []byte, content string, useResponses bool) []byte {
 	if len(body) == 0 {
 		return body
 	}
@@ -745,9 +745,10 @@ func injectFakeAssistantIntoMessages(body []byte, content string) []byte {
 		// No user message: copy all items, append fake at end.
 		for _, item := range items {
 			var obj any
-			if err := json.Unmarshal([]byte(item.Raw), &obj); err == nil {
-				newItems = append(newItems, obj)
+			if err := json.Unmarshal([]byte(item.Raw), &obj); err != nil {
+				return body // malformed item: return original body unchanged
 			}
+			newItems = append(newItems, obj)
 		}
 		newItems = append(newItems, fakeMsg)
 	} else {
@@ -756,9 +757,10 @@ func injectFakeAssistantIntoMessages(body []byte, content string) []byte {
 				newItems = append(newItems, fakeMsg)
 			}
 			var obj any
-			if err := json.Unmarshal([]byte(item.Raw), &obj); err == nil {
-				newItems = append(newItems, obj)
+			if err := json.Unmarshal([]byte(item.Raw), &obj); err != nil {
+				return body // malformed item: return original body unchanged
 			}
+			newItems = append(newItems, obj)
 		}
 	}
 
@@ -796,9 +798,10 @@ func injectFakeAssistantIntoInput(body []byte, content string) []byte {
 	if lastUserIdx == -1 {
 		for _, item := range items {
 			var obj any
-			if err := json.Unmarshal([]byte(item.Raw), &obj); err == nil {
-				newItems = append(newItems, obj)
+			if err := json.Unmarshal([]byte(item.Raw), &obj); err != nil {
+				return body // malformed item: return original body unchanged
 			}
+			newItems = append(newItems, obj)
 		}
 		newItems = append(newItems, fakeMsg)
 	} else {
@@ -807,9 +810,10 @@ func injectFakeAssistantIntoInput(body []byte, content string) []byte {
 				newItems = append(newItems, fakeMsg)
 			}
 			var obj any
-			if err := json.Unmarshal([]byte(item.Raw), &obj); err == nil {
-				newItems = append(newItems, obj)
+			if err := json.Unmarshal([]byte(item.Raw), &obj); err != nil {
+				return body // malformed item: return original body unchanged
 			}
+			newItems = append(newItems, obj)
 		}
 	}
 
