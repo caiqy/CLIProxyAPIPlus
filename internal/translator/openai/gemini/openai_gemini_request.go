@@ -112,7 +112,13 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	out, _ = sjson.Set(out, "stream", stream)
 
 	// Process contents (Gemini messages) -> OpenAI messages
-	var toolCallIDs []string // Track tool call IDs for matching with tool results
+	// Track pending tool calls for matching with subsequent functionResponse parts.
+	// NOTE: Gemini functionResponse does not carry an explicit call id, only a name.
+	type pendingToolCall struct {
+		id   string
+		name string
+	}
+	var pendingToolCalls []pendingToolCall
 
 	// System instruction -> OpenAI system message
 	// Gemini may provide `systemInstruction` or `system_instruction`; support both keys.
@@ -210,11 +216,12 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					// Handle function calls (Gemini) -> tool calls (OpenAI)
 					if functionCall := part.Get("functionCall"); functionCall.Exists() {
 						toolCallID := genToolCallID()
-						toolCallIDs = append(toolCallIDs, toolCallID)
+						functionName := functionCall.Get("name").String()
+						pendingToolCalls = append(pendingToolCalls, pendingToolCall{id: toolCallID, name: functionName})
 
 						toolCall := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
 						toolCall, _ = sjson.Set(toolCall, "id", toolCallID)
-						toolCall, _ = sjson.Set(toolCall, "function.name", functionCall.Get("name").String())
+						toolCall, _ = sjson.Set(toolCall, "function.name", functionName)
 
 						// Convert args to arguments JSON string
 						if args := functionCall.Get("args"); args.Exists() {
@@ -232,24 +239,44 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Create tool message for function response
 						toolMsg := `{"role":"tool","tool_call_id":"","content":""}`
 
-						// Convert response.content to JSON string
-						if response := functionResponse.Get("response"); response.Exists() {
-							if contentField := response.Get("content"); contentField.Exists() {
-								toolMsg, _ = sjson.Set(toolMsg, "content", contentField.Raw)
-							} else {
-								toolMsg, _ = sjson.Set(toolMsg, "content", response.Raw)
+						// Match tool_call_id for this function response.
+						functionName := functionResponse.Get("name").String()
+						toolCallID := ""
+						if len(pendingToolCalls) > 0 {
+							if functionName != "" {
+								for i := 0; i < len(pendingToolCalls); i++ {
+									if pendingToolCalls[i].name == functionName {
+										toolCallID = pendingToolCalls[i].id
+										pendingToolCalls = append(pendingToolCalls[:i], pendingToolCalls[i+1:]...)
+										break
+									}
+								}
+							}
+							if toolCallID == "" {
+								toolCallID = pendingToolCalls[0].id
+								pendingToolCalls = pendingToolCalls[1:]
 							}
 						}
+						if toolCallID == "" {
+							toolCallID = genToolCallID()
+						}
+						toolMsg, _ = sjson.Set(toolMsg, "tool_call_id", toolCallID)
 
-						// Try to match with previous tool call ID
-						_ = functionResponse.Get("name").String() // functionName not used for now
-						if len(toolCallIDs) > 0 {
-							// Use the last tool call ID (simple matching by function name)
-							// In a real implementation, you might want more sophisticated matching
-							toolMsg, _ = sjson.Set(toolMsg, "tool_call_id", toolCallIDs[len(toolCallIDs)-1])
-						} else {
-							// Generate a tool call ID if none available
-							toolMsg, _ = sjson.Set(toolMsg, "tool_call_id", genToolCallID())
+						// Convert response.content into an OpenAI tool message content string.
+						if response := functionResponse.Get("response"); response.Exists() {
+							if contentField := response.Get("content"); contentField.Exists() {
+								if contentField.Type == gjson.String {
+									toolMsg, _ = sjson.Set(toolMsg, "content", contentField.String())
+								} else {
+									toolMsg, _ = sjson.Set(toolMsg, "content", contentField.Raw)
+								}
+							} else {
+								if response.Type == gjson.String {
+									toolMsg, _ = sjson.Set(toolMsg, "content", response.String())
+								} else {
+									toolMsg, _ = sjson.Set(toolMsg, "content", response.Raw)
+								}
+							}
 						}
 
 						out, _ = sjson.SetRaw(out, "messages.-1", toolMsg)
