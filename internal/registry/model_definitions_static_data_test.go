@@ -115,8 +115,17 @@ func TestGetGitHubCopilotModels_ClaudeSonnet45SupportsThinking(t *testing.T) {
 	if target.Thinking == nil {
 		t.Fatal("claude-sonnet-4.5 should support thinking")
 	}
-	if len(target.Thinking.Levels) == 0 {
-		t.Fatal("claude-sonnet-4.5 thinking levels should not be empty")
+	// 4.5 uses budget-based thinking (enabled/disabled), not adaptive.
+	// ThinkingLevels must be empty to prevent the Claude applier from emitting
+	// thinking.type="adaptive", which upstream Copilot API does not accept for 4.5.
+	if len(target.Thinking.Levels) != 0 {
+		t.Fatal("claude-sonnet-4.5 should NOT have thinking levels (not adaptive)")
+	}
+	if target.Thinking.Max == 0 {
+		t.Fatal("claude-sonnet-4.5 should have thinking budget max")
+	}
+	if target.Thinking.Min == 0 {
+		t.Fatal("claude-sonnet-4.5 should have thinking budget min")
 	}
 }
 
@@ -135,6 +144,12 @@ func TestGetGitHubCopilotModels_ClaudeOpus45SupportsThinking(t *testing.T) {
 	if target.Thinking == nil {
 		t.Fatal("claude-opus-4.5 should support thinking")
 	}
+	if len(target.Thinking.Levels) != 0 {
+		t.Fatal("claude-opus-4.5 should NOT have thinking levels (not adaptive)")
+	}
+	if target.Thinking.Max == 0 {
+		t.Fatal("claude-opus-4.5 should have thinking budget max")
+	}
 }
 
 func TestGetGitHubCopilotModels_ClaudeHaiku45SupportsThinking(t *testing.T) {
@@ -152,6 +167,12 @@ func TestGetGitHubCopilotModels_ClaudeHaiku45SupportsThinking(t *testing.T) {
 	if target.Thinking == nil {
 		t.Fatal("claude-haiku-4.5 should support thinking")
 	}
+	if len(target.Thinking.Levels) != 0 {
+		t.Fatal("claude-haiku-4.5 should NOT have thinking levels (not adaptive)")
+	}
+	if target.Thinking.Max == 0 {
+		t.Fatal("claude-haiku-4.5 should have thinking budget max")
+	}
 }
 
 func TestGetGitHubCopilotModels_ClaudeSonnet4SupportsThinking(t *testing.T) {
@@ -168,6 +189,12 @@ func TestGetGitHubCopilotModels_ClaudeSonnet4SupportsThinking(t *testing.T) {
 	}
 	if target.Thinking == nil {
 		t.Fatal("claude-sonnet-4 should support thinking")
+	}
+	if len(target.Thinking.Levels) != 0 {
+		t.Fatal("claude-sonnet-4 should NOT have thinking levels (not adaptive)")
+	}
+	if target.Thinking.Max == 0 {
+		t.Fatal("claude-sonnet-4 should have thinking budget max")
 	}
 }
 
