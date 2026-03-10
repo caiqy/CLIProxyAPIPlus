@@ -76,3 +76,26 @@ func TestGetGitHubCopilotModels_IncludesExactIDsFromModelsAPI(t *testing.T) {
 		}
 	}
 }
+
+func TestGetGitHubCopilotModels_ExcludesObsoleteIDs(t *testing.T) {
+	models := GetGitHubCopilotModels()
+	index := make(map[string]struct{}, len(models))
+	for _, m := range models {
+		if m != nil {
+			index[m.ID] = struct{}{}
+		}
+	}
+
+	obsoleteIDs := []string{
+		"gpt-5",
+		"gpt-5-codex",
+		"claude-opus-4.1",
+		"oswe-vscode-prime",
+	}
+
+	for _, obsoleteID := range obsoleteIDs {
+		if _, ok := index[obsoleteID]; ok {
+			t.Fatalf("expected static GitHub Copilot models to exclude obsolete model %s", obsoleteID)
+		}
+	}
+}
