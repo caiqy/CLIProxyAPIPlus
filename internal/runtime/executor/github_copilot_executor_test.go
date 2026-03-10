@@ -195,6 +195,71 @@ func TestNormalizeGitHubCopilotResponsesInput_NonStringInputStringified(t *testi
 	}
 }
 
+func TestNormalizeGitHubCopilotResponsesInput_SanitizesTextContentType(t *testing.T) {
+	t.Parallel()
+	// Simulates a client that sends openai-response format with "type":"text" instead of
+	// "type":"input_text"/"output_text". The normalize function should fix these on pass-through
+	// to avoid Copilot rejecting the request with:
+	//   Invalid value: 'text'. Supported values are: 'input_text', 'input_image', 'output_text', ...
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"text","text":"hello"}]},
+			{"type":"message","role":"assistant","content":[{"type":"text","text":"hi there"}]},
+			{"type":"message","role":"developer","content":[{"type":"text","text":"system prompt"}]}
+		]
+	}`)
+	got := normalizeGitHubCopilotResponsesInput(body)
+	input := gjson.GetBytes(got, "input")
+	if !input.IsArray() {
+		t.Fatalf("input should be an array, got %v", input.Type)
+	}
+	for _, item := range input.Array() {
+		role := item.Get("role").String()
+		for _, c := range item.Get("content").Array() {
+			cType := c.Get("type").String()
+			if cType == "text" {
+				t.Fatalf("content type should not be 'text' after normalization, role=%s, got: %s", role, item.Raw)
+			}
+			switch role {
+			case "user", "developer":
+				if cType != "input_text" {
+					t.Fatalf("expected input_text for role=%s, got %q", role, cType)
+				}
+			case "assistant":
+				if cType != "output_text" {
+					t.Fatalf("expected output_text for role=assistant, got %q", cType)
+				}
+			}
+		}
+	}
+}
+
+func TestNormalizeGitHubCopilotResponsesInput_PreservesValidInputTypes(t *testing.T) {
+	t.Parallel()
+	// Input that already uses correct types should NOT be modified.
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]},
+			{"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"},
+			{"type":"function_call_output","call_id":"c1","output":"ok"}
+		]
+	}`)
+	got := normalizeGitHubCopilotResponsesInput(body)
+	input := gjson.GetBytes(got, "input")
+	// Verify the first message content type is still input_text
+	firstContent := input.Array()[0].Get("content.0.type").String()
+	if firstContent != "input_text" {
+		t.Fatalf("expected input_text preserved, got %q", firstContent)
+	}
+	// Verify function_call items are untouched
+	if input.Array()[2].Get("type").String() != "function_call" {
+		t.Fatalf("expected function_call item preserved")
+	}
+}
+
 func TestNormalizeGitHubCopilotResponsesTools_FlattenFunctionTools(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"tools":[{"type":"function","function":{"name":"sum","description":"d","parameters":{"type":"object"}}},{"type":"web_search"}]}`)

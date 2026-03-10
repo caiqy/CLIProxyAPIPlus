@@ -955,9 +955,13 @@ func normalizeGitHubCopilotChatTools(body []byte) []byte {
 func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if input.Exists() {
-		// If input is already a string or array, keep it as-is.
-		if input.Type == gjson.String || input.IsArray() {
+		if input.Type == gjson.String {
 			return body
+		}
+		if input.IsArray() {
+			// Sanitize content types: some clients send "type":"text" inside
+			// Responses API input, but Copilot requires "input_text"/"output_text".
+			return sanitizeResponsesInputContentTypes(body)
 		}
 		// Non-string/non-array input: stringify as fallback.
 		body, _ = sjson.SetBytes(body, "input", input.Raw)
@@ -1122,6 +1126,44 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 	// Remove messages/system since we've converted them to input
 	body, _ = sjson.DeleteBytes(body, "messages")
 	body, _ = sjson.DeleteBytes(body, "system")
+	return body
+}
+
+// sanitizeResponsesInputContentTypes rewrites "type":"text" content parts in a
+// Responses API input[] array to the correct "input_text" or "output_text" based
+// on the enclosing message role.  This fixes the 400 error from Copilot:
+//
+//	Invalid value: 'text'. Supported values are: 'input_text', 'input_image',
+//	'output_text', 'refusal', 'input_file', 'computer_screenshot', 'summary_text'.
+func sanitizeResponsesInputContentTypes(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	dirty := false
+	for i, item := range input.Array() {
+		if item.Get("type").String() != "message" {
+			continue
+		}
+		role := item.Get("role").String()
+		content := item.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for j, c := range content.Array() {
+			if c.Get("type").String() != "text" {
+				continue
+			}
+			newType := "input_text"
+			if role == "assistant" {
+				newType = "output_text"
+			}
+			path := fmt.Sprintf("input.%d.content.%d.type", i, j)
+			body, _ = sjson.SetBytes(body, path, newType)
+			dirty = true
+		}
+	}
+	_ = dirty
 	return body
 }
 
