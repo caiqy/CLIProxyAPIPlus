@@ -1097,6 +1097,9 @@ func TestInjectFakeAssistantMessage_ResponsesInputFormat(t *testing.T) {
 	if items[0].Get("type").String() != "message" {
 		t.Fatalf("items[0].type = %q, want message", items[0].Get("type").String())
 	}
+	if got := items[0].Get("content.0.type").String(); got != "output_text" {
+		t.Fatalf("items[0].content[0].type = %q, want output_text", got)
+	}
 }
 
 func TestInjectFakeAssistantMessage_EmptyBody(t *testing.T) {

@@ -790,7 +790,7 @@ func injectFakeAssistantIntoInput(body []byte, content string) []byte {
 		"type": "message",
 		"role": "assistant",
 		"content": []map[string]any{
-			{"type": "text", "text": content},
+			{"type": "output_text", "text": content},
 		},
 	}
 
