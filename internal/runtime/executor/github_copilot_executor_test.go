@@ -771,3 +771,92 @@ func TestGitHubCopilotMessagesStream_ClaudeToClaude_AppendsNewlinePerLine(t *tes
 		t.Fatalf("first chunk must end with newline; got %q", string(first.Payload))
 	}
 }
+
+func TestGitHubCopilotExecute_BetasExtractedFromBodyIntoHeader(t *testing.T) {
+	t.Parallel()
+
+	var capturedHeaders http.Header
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		capturedHeaders = req.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"claude-opus-4.6","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)),
+		}, nil
+	}))
+
+	e := NewGitHubCopilotExecutor(&config.Config{SDKConfig: config.SDKConfig{UpstreamTimeouts: config.UpstreamTimeouts{
+		ConnectTimeoutSeconds: 11, ResponseHeaderTimeoutSeconds: 41,
+	}}})
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	// payload 中包含 betas 字段
+	payload := []byte(`{"model":"claude-opus-4.6","max_tokens":128,"messages":[{"role":"user","content":"hi"}],"betas":["files-api-2025-04-14"]}`)
+
+	_, err := e.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4.6",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	betaHeader := capturedHeaders.Get("Anthropic-Beta")
+	if !strings.Contains(betaHeader, "files-api-2025-04-14") {
+		t.Fatalf("Anthropic-Beta = %q, want to contain files-api-2025-04-14 (extracted from body)", betaHeader)
+	}
+}
+
+func TestGitHubCopilotExecute_ThinkingDisabledWhenToolChoiceForced(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		var err error
+		capturedBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"claude-opus-4.6","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)),
+		}, nil
+	}))
+
+	e := NewGitHubCopilotExecutor(&config.Config{SDKConfig: config.SDKConfig{UpstreamTimeouts: config.UpstreamTimeouts{
+		ConnectTimeoutSeconds: 12, ResponseHeaderTimeoutSeconds: 42,
+	}}})
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	// thinking enabled + tool_choice forced → thinking 应被禁用
+	payload := []byte(`{"model":"claude-opus-4.6","max_tokens":128,"thinking":{"type":"enabled","budget_tokens":8000},"tool_choice":{"type":"tool","name":"my_tool"},"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, err := e.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4.6",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	thinkingResult := gjson.GetBytes(capturedBody, "thinking")
+	if thinkingResult.Exists() {
+		thinkingType := thinkingResult.Get("type").String()
+		if thinkingType == "enabled" || thinkingType == "adaptive" {
+			t.Fatalf("thinking should be absent or disabled when tool_choice forces tool use, got thinking=%s", thinkingResult.Raw)
+		}
+	}
+}

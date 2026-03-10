@@ -187,6 +187,12 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated, requestedModel)
+	// For Claude /v1/messages: extract betas from body into header, and enforce thinking constraints.
+	var extraBetas []string
+	if useMessages {
+		extraBetas, body = extractAndRemoveBetas(body)
+		body = disableThinkingIfToolChoiceForced(body)
+	}
 	body, _ = sjson.SetBytes(body, "stream", false)
 
 	path := selectGitHubCopilotEndpoint(from, req.Model)
@@ -195,7 +201,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	if err != nil {
 		return resp, err
 	}
-	e.applyHeaders(httpReq, apiToken, body, false, useMessages, nil)
+	e.applyHeaders(httpReq, apiToken, body, false, useMessages, extraBetas)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
@@ -325,6 +331,12 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated, requestedModel)
+	// For Claude /v1/messages: extract betas from body into header, and enforce thinking constraints.
+	var extraBetas []string
+	if useMessages {
+		extraBetas, body = extractAndRemoveBetas(body)
+		body = disableThinkingIfToolChoiceForced(body)
+	}
 	body, _ = sjson.SetBytes(body, "stream", true)
 
 	path := selectGitHubCopilotEndpoint(from, req.Model)
@@ -333,7 +345,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if err != nil {
 		return nil, err
 	}
-	e.applyHeaders(httpReq, apiToken, body, true, useMessages, nil)
+	e.applyHeaders(httpReq, apiToken, body, true, useMessages, extraBetas)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
