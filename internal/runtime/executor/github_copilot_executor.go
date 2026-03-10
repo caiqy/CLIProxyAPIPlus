@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -680,6 +681,131 @@ func containsAgentConversationRole(body []byte) bool {
 	}
 
 	return false
+}
+
+// fakeAssistantContentDefault is the default content for injected assistant messages.
+const fakeAssistantContentDefault = "OK."
+
+// injectFakeAssistantMessage inserts a fake assistant turn immediately before the
+// last user-role message in the request body. If no user message is found, the
+// assistant message is appended. Returns body unchanged when body is empty.
+//
+// Supported body shapes:
+//   - messages[] — used by /chat/completions and /v1/messages
+//   - input[]    — used by /responses (useResponses=true)
+func injectFakeAssistantMessage(body []byte, content string, _, useResponses bool) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if strings.TrimSpace(content) == "" {
+		content = fakeAssistantContentDefault
+	}
+	if useResponses {
+		return injectFakeAssistantIntoInput(body, content)
+	}
+	return injectFakeAssistantIntoMessages(body, content)
+}
+
+// injectFakeAssistantIntoMessages handles the messages[] array format (OpenAI chat / Claude messages).
+func injectFakeAssistantIntoMessages(body []byte, content string) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+	items := messages.Array()
+
+	// Find last user message index.
+	lastUserIdx := -1
+	for i, item := range items {
+		if strings.ToLower(strings.TrimSpace(item.Get("role").String())) == "user" {
+			lastUserIdx = i
+		}
+	}
+
+	fakeMsg := map[string]any{
+		"role":    "assistant",
+		"content": content,
+	}
+
+	// Rebuild the array with the fake message inserted before the last user message.
+	var newItems []any
+	if lastUserIdx == -1 {
+		// No user message: copy all items, append fake at end.
+		for _, item := range items {
+			var obj any
+			if err := json.Unmarshal([]byte(item.Raw), &obj); err == nil {
+				newItems = append(newItems, obj)
+			}
+		}
+		newItems = append(newItems, fakeMsg)
+	} else {
+		for i, item := range items {
+			if i == lastUserIdx {
+				newItems = append(newItems, fakeMsg)
+			}
+			var obj any
+			if err := json.Unmarshal([]byte(item.Raw), &obj); err == nil {
+				newItems = append(newItems, obj)
+			}
+		}
+	}
+
+	newBody, err := sjson.SetBytes(body, "messages", newItems)
+	if err != nil {
+		return body
+	}
+	return newBody
+}
+
+// injectFakeAssistantIntoInput handles the input[] array format (Responses API).
+func injectFakeAssistantIntoInput(body []byte, content string) []byte {
+	inputs := gjson.GetBytes(body, "input")
+	if !inputs.Exists() || !inputs.IsArray() {
+		return body
+	}
+	items := inputs.Array()
+
+	lastUserIdx := -1
+	for i, item := range items {
+		if strings.ToLower(strings.TrimSpace(item.Get("role").String())) == "user" {
+			lastUserIdx = i
+		}
+	}
+
+	fakeMsg := map[string]any{
+		"type": "message",
+		"role": "assistant",
+		"content": []map[string]any{
+			{"type": "text", "text": content},
+		},
+	}
+
+	var newItems []any
+	if lastUserIdx == -1 {
+		for _, item := range items {
+			var obj any
+			if err := json.Unmarshal([]byte(item.Raw), &obj); err == nil {
+				newItems = append(newItems, obj)
+			}
+		}
+		newItems = append(newItems, fakeMsg)
+	} else {
+		for i, item := range items {
+			if i == lastUserIdx {
+				newItems = append(newItems, fakeMsg)
+			}
+			var obj any
+			if err := json.Unmarshal([]byte(item.Raw), &obj); err == nil {
+				newItems = append(newItems, obj)
+			}
+		}
+	}
+
+	newBody, err := sjson.SetBytes(body, "input", newItems)
+	if err != nil {
+		return body
+	}
+	return newBody
 }
 
 // detectVisionContent checks if the request body contains vision/image content.
