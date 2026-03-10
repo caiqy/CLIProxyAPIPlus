@@ -44,7 +44,7 @@ const (
 	copilotIntegrationID = "vscode-chat"
 	copilotOpenAIIntent  = "conversation-agent"
 	copilotGitHubAPIVer  = "2025-10-01"
-	copilotAnthropicBeta = "advanced-tool-use-2025-11-20"
+	copilotAnthropicBeta = "advanced-tool-use-2025-11-20,interleaved-thinking-2025-05-14"
 )
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
@@ -101,7 +101,7 @@ func (e *GitHubCopilotExecutor) PrepareRequest(req *http.Request, auth *cliproxy
 		return errToken
 	}
 	useMessages := req.URL != nil && strings.HasPrefix(req.URL.Path, githubCopilotMessagesPath)
-	e.applyHeaders(req, apiToken, nil, false, useMessages)
+	e.applyHeaders(req, apiToken, nil, false, useMessages, nil)
 	return nil
 }
 
@@ -195,7 +195,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	if err != nil {
 		return resp, err
 	}
-	e.applyHeaders(httpReq, apiToken, body, false, useMessages)
+	e.applyHeaders(httpReq, apiToken, body, false, useMessages, nil)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
@@ -333,7 +333,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if err != nil {
 		return nil, err
 	}
-	e.applyHeaders(httpReq, apiToken, body, true, useMessages)
+	e.applyHeaders(httpReq, apiToken, body, true, useMessages, nil)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
@@ -534,7 +534,7 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 }
 
 // applyHeaders sets the required headers for GitHub Copilot API requests.
-func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, body []byte, stream bool, useMessages bool) {
+func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, body []byte, stream bool, useMessages bool, extraBetas []string) {
 	var ginHeaders http.Header
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
@@ -555,7 +555,31 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
 	r.Header.Set("X-Github-Api-Version", copilotGitHubAPIVer)
 	r.Header.Set("X-Request-Id", uuid.NewString())
 	if useMessages {
-		r.Header.Set("Anthropic-Beta", copilotAnthropicBeta)
+		baseBeta := copilotAnthropicBeta
+		// Build deduplicated beta set: defaults + user header + body betas.
+		betaSet := make(map[string]bool)
+		for _, b := range strings.Split(baseBeta, ",") {
+			if trimmed := strings.TrimSpace(b); trimmed != "" {
+				betaSet[trimmed] = true
+			}
+		}
+		if ginHeaders != nil {
+			if v := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); v != "" {
+				for _, b := range strings.Split(v, ",") {
+					if trimmed := strings.TrimSpace(b); trimmed != "" && !betaSet[trimmed] {
+						betaSet[trimmed] = true
+						baseBeta += "," + trimmed
+					}
+				}
+			}
+		}
+		for _, b := range extraBetas {
+			if trimmed := strings.TrimSpace(b); trimmed != "" && !betaSet[trimmed] {
+				betaSet[trimmed] = true
+				baseBeta += "," + trimmed
+			}
+		}
+		r.Header.Set("Anthropic-Beta", baseBeta)
 	} else {
 		r.Header.Del("Anthropic-Beta")
 	}
@@ -579,11 +603,6 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
 		for _, key := range forwardHeaders {
 			if v := strings.TrimSpace(ginHeaders.Get(key)); v != "" {
 				r.Header.Set(key, v)
-			}
-		}
-		if useMessages {
-			if v := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); v != "" {
-				r.Header.Set("Anthropic-Beta", v)
 			}
 		}
 	}

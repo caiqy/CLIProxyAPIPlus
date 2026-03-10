@@ -319,7 +319,7 @@ func TestApplyHeaders_XInitiator_UserOnly(t *testing.T) {
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
 	body := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}`)
-	e.applyHeaders(req, "token", body, false, false)
+	e.applyHeaders(req, "token", body, false, false, nil)
 	if got := req.Header.Get("X-Initiator"); got != "user" {
 		t.Fatalf("X-Initiator = %q, want user", got)
 	}
@@ -331,7 +331,7 @@ func TestApplyHeaders_XInitiator_AgentWhenAnyAssistantRoleExists(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
 	// Align with copilot-api: any assistant/tool role makes initiator agent.
 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"I will read the file"},{"role":"user","content":"tool result here"}]}`)
-	e.applyHeaders(req, "token", body, false, false)
+	e.applyHeaders(req, "token", body, false, false, nil)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
 		t.Fatalf("X-Initiator = %q, want agent (assistant role exists)", got)
 	}
@@ -342,7 +342,7 @@ func TestApplyHeaders_XInitiator_AgentWithToolRole(t *testing.T) {
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"tool","content":"result"}]}`)
-	e.applyHeaders(req, "token", body, false, false)
+	e.applyHeaders(req, "token", body, false, false, nil)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
 		t.Fatalf("X-Initiator = %q, want agent (tool role exists)", got)
 	}
@@ -353,7 +353,7 @@ func TestApplyHeaders_XInitiator_InputArrayLastAssistantMessage(t *testing.T) {
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
 	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Hi"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}]}`)
-	e.applyHeaders(req, "token", body, false, false)
+	e.applyHeaders(req, "token", body, false, false, nil)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
 		t.Fatalf("X-Initiator = %q, want agent (last role is assistant)", got)
 	}
@@ -364,7 +364,7 @@ func TestApplyHeaders_XInitiator_InputArrayAgentWhenAnyAssistantMessage(t *testi
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
 	body := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I can help"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"Do X"}]}]}`)
-	e.applyHeaders(req, "token", body, false, false)
+	e.applyHeaders(req, "token", body, false, false, nil)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
 		t.Fatalf("X-Initiator = %q, want agent (assistant role exists in input)", got)
 	}
@@ -375,7 +375,7 @@ func TestApplyHeaders_XInitiator_InputArrayUserOnly(t *testing.T) {
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
 	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"A"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"B"}]}]}`)
-	e.applyHeaders(req, "token", body, false, false)
+	e.applyHeaders(req, "token", body, false, false, nil)
 	if got := req.Header.Get("X-Initiator"); got != "user" {
 		t.Fatalf("X-Initiator = %q, want user (user-only input array)", got)
 	}
@@ -386,7 +386,7 @@ func TestApplyHeaders_XInitiator_InputArrayLastFunctionCallOutput(t *testing.T) 
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
 	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Use tool"}]},{"type":"function_call","call_id":"c1","name":"Read","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"ok"}]}`)
-	e.applyHeaders(req, "token", body, false, false)
+	e.applyHeaders(req, "token", body, false, false, nil)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
 		t.Fatalf("X-Initiator = %q, want agent (last item maps to tool role)", got)
 	}
@@ -398,7 +398,7 @@ func TestApplyHeaders_GitHubAPIVersion(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	e.applyHeaders(req, "token", nil, false, false)
+	e.applyHeaders(req, "token", nil, false, false, nil)
 	if got := req.Header.Get("X-Github-Api-Version"); got != "2025-10-01" {
 		t.Fatalf("X-Github-Api-Version = %q, want 2025-10-01", got)
 	}
@@ -408,7 +408,7 @@ func TestApplyHeaders_OpenAIIntent(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	e.applyHeaders(req, "token", nil, false, false)
+	e.applyHeaders(req, "token", nil, false, false, nil)
 	if got := req.Header.Get("Openai-Intent"); got != "conversation-agent" {
 		t.Fatalf("Openai-Intent = %q, want conversation-agent", got)
 	}
@@ -418,7 +418,7 @@ func TestApplyHeaders_CopilotClientVersionHeaders(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	e.applyHeaders(req, "token", nil, false, false)
+	e.applyHeaders(req, "token", nil, false, false, nil)
 	if got := req.Header.Get("User-Agent"); got != "GitHubCopilotChat/0.38.2" {
 		t.Fatalf("User-Agent = %q, want GitHubCopilotChat/0.38.2", got)
 	}
@@ -434,7 +434,7 @@ func TestApplyHeaders_StreamAcceptSSE(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	e.applyHeaders(req, "token", nil, true, false)
+	e.applyHeaders(req, "token", nil, true, false, nil)
 	if got := req.Header.Get("Accept"); got != "text/event-stream" {
 		t.Fatalf("Accept = %q, want text/event-stream", got)
 	}
@@ -444,9 +444,59 @@ func TestApplyHeaders_MessagesAddsAnthropicBeta(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	e.applyHeaders(req, "token", nil, false, true)
-	if got := req.Header.Get("Anthropic-Beta"); got != "advanced-tool-use-2025-11-20" {
-		t.Fatalf("Anthropic-Beta = %q, want advanced-tool-use-2025-11-20", got)
+	e.applyHeaders(req, "token", nil, false, true, nil)
+	got := req.Header.Get("Anthropic-Beta")
+	if !strings.Contains(got, "advanced-tool-use-2025-11-20") {
+		t.Fatalf("Anthropic-Beta = %q, want to contain advanced-tool-use-2025-11-20", got)
+	}
+	if !strings.Contains(got, "interleaved-thinking-2025-05-14") {
+		t.Fatalf("Anthropic-Beta = %q, want to contain interleaved-thinking-2025-05-14", got)
+	}
+}
+
+func TestApplyHeaders_MessagesUserBetaMergedNotOverridden(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	incomingReq, _ := http.NewRequest(http.MethodPost, "http://local.test", nil)
+	incomingReq.Header.Set("Anthropic-Beta", "my-custom-beta-2025-01-01")
+
+	w := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(w)
+	ginCtx.Request = incomingReq
+
+	outReq, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/messages", nil)
+	outReq = outReq.WithContext(context.WithValue(outReq.Context(), "gin", ginCtx))
+
+	e := &GitHubCopilotExecutor{}
+	e.applyHeaders(outReq, "token", nil, false, true, nil)
+
+	got := outReq.Header.Get("Anthropic-Beta")
+	// 默认 beta 不能丢失
+	if !strings.Contains(got, "advanced-tool-use-2025-11-20") {
+		t.Fatalf("Anthropic-Beta = %q, want to retain advanced-tool-use-2025-11-20", got)
+	}
+	// 用户自定义 beta 必须存在
+	if !strings.Contains(got, "my-custom-beta-2025-01-01") {
+		t.Fatalf("Anthropic-Beta = %q, want to contain my-custom-beta-2025-01-01", got)
+	}
+}
+
+func TestApplyHeaders_MessagesExtraBetasFromBodyMerged(t *testing.T) {
+	t.Parallel()
+	e := &GitHubCopilotExecutor{}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	extraBetas := []string{"files-api-2025-04-14", "advanced-tool-use-2025-11-20"} // 后者重复，应去重
+	e.applyHeaders(req, "token", nil, false, true, extraBetas)
+	got := req.Header.Get("Anthropic-Beta")
+	// files-api beta 必须出现
+	if !strings.Contains(got, "files-api-2025-04-14") {
+		t.Fatalf("Anthropic-Beta = %q, want to contain files-api-2025-04-14", got)
+	}
+	// 重复 beta 不能导致重复值（advanced-tool-use 应只出现一次）
+	count := strings.Count(got, "advanced-tool-use-2025-11-20")
+	if count != 1 {
+		t.Fatalf("Anthropic-Beta = %q, advanced-tool-use-2025-11-20 appears %d times, want 1", got, count)
 	}
 }
 
@@ -465,7 +515,7 @@ func TestApplyHeaders_NonMessagesDoesNotForwardAnthropicBeta(t *testing.T) {
 	outReq = outReq.WithContext(context.WithValue(outReq.Context(), "gin", ginCtx))
 
 	e := &GitHubCopilotExecutor{}
-	e.applyHeaders(outReq, "token", nil, false, false)
+	e.applyHeaders(outReq, "token", nil, false, false, nil)
 	if got := outReq.Header.Get("Anthropic-Beta"); got != "" {
 		t.Fatalf("Anthropic-Beta = %q, want empty for non-messages", got)
 	}
@@ -486,7 +536,7 @@ func TestApplyHeaders_AgentTaskIDFallbackToRequestID(t *testing.T) {
 	outReq = outReq.WithContext(context.WithValue(outReq.Context(), "gin", ginCtx))
 
 	e := &GitHubCopilotExecutor{}
-	e.applyHeaders(outReq, "token", nil, false, true)
+	e.applyHeaders(outReq, "token", nil, false, true, nil)
 	if got := outReq.Header.Get("X-Agent-Task-Id"); got != "req-id-fallback-1" {
 		t.Fatalf("X-Agent-Task-Id = %q, want req-id-fallback-1", got)
 	}
@@ -521,7 +571,7 @@ func TestApplyHeaders_ForwardStrictCopilotContextHeaders(t *testing.T) {
 
 	e := &GitHubCopilotExecutor{}
 	// X-Initiator must be generated locally from payload roles.
-	e.applyHeaders(outReq, "token", []byte(`{"messages":[{"role":"assistant","content":"ok"}]}`), false, true)
+	e.applyHeaders(outReq, "token", []byte(`{"messages":[{"role":"assistant","content":"ok"}]}`), false, true, nil)
 
 	checks := map[string]string{
 		"Vscode-Abexpcontext":                 "abexp-ctx",
@@ -562,7 +612,7 @@ func TestApplyHeaders_XInitiator_NotForwardedFromIncomingRequest(t *testing.T) {
 
 	e := &GitHubCopilotExecutor{}
 	// payload is user-only, so locally generated value must be user
-	e.applyHeaders(outReq, "token", []byte(`{"messages":[{"role":"user","content":"hello"}]}`), false, true)
+	e.applyHeaders(outReq, "token", []byte(`{"messages":[{"role":"user","content":"hello"}]}`), false, true, nil)
 
 	if got := outReq.Header.Get("X-Initiator"); got != "user" {
 		t.Fatalf("X-Initiator = %q, want user", got)
