@@ -1165,3 +1165,51 @@ func TestExecute_ForceAgentInitiator_Disabled_NoInjection(t *testing.T) {
 		t.Fatalf("X-Initiator = %q, want user (feature disabled)", capturedInitiator)
 	}
 }
+
+// --- Integration test for ExecuteStream with force-agent-initiator ---
+
+func TestExecuteStream_ForceAgentInitiator_InjectsAssistant(t *testing.T) {
+	t.Parallel()
+
+	var capturedInitiator string
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		capturedInitiator = r.Header.Get("X-Initiator")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		}, nil
+	}))
+
+	cfg := &config.Config{}
+	cfg.GitHubCopilot.ForceAgentInitiator = true
+
+	e := NewGitHubCopilotExecutor(cfg)
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
+
+	stream, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream failed: %v", err)
+	}
+	if stream != nil {
+		for range stream.Chunks {
+		}
+	}
+	if capturedInitiator != "agent" {
+		t.Fatalf("X-Initiator = %q, want agent", capturedInitiator)
+	}
+}
