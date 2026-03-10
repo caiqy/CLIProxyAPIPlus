@@ -137,11 +137,17 @@ func GetGitHubCopilotModels() []*ModelInfo {
 		MaxCompletionTokens int
 		SupportedEndpoints  []string
 		ThinkingLevels      []string
+		// ThinkingMinBudget/ThinkingMaxBudget enable budget-based (or hybrid) thinking.
+		// When both ThinkingLevels and ThinkingMin/MaxBudget are set, the model is CapabilityHybrid.
+		ThinkingMinBudget   int
+		ThinkingMaxBudget   int
+		ThinkingZeroAllowed bool
+		ThinkingDynamic     bool
 	}
 
 	defs := []copilotModelDef{
-		{ID: "claude-opus-4.6", DisplayName: "Claude Opus 4.6", Description: "Anthropic Claude Opus 4.6 via GitHub Copilot", ContextLength: 200000, MaxCompletionTokens: 64000, SupportedEndpoints: []string{"/v1/messages", "/chat/completions"}, ThinkingLevels: []string{"low", "medium", "high"}},
-		{ID: "claude-sonnet-4.6", DisplayName: "Claude Sonnet 4.6", Description: "Anthropic Claude Sonnet 4.6 via GitHub Copilot", ContextLength: 200000, MaxCompletionTokens: 32000, SupportedEndpoints: []string{"/chat/completions", "/v1/messages"}, ThinkingLevels: []string{"low", "medium", "high"}},
+		{ID: "claude-opus-4.6", DisplayName: "Claude Opus 4.6", Description: "Anthropic Claude Opus 4.6 via GitHub Copilot", ContextLength: 200000, MaxCompletionTokens: 64000, SupportedEndpoints: []string{"/v1/messages", "/chat/completions"}, ThinkingLevels: []string{"low", "medium", "high"}, ThinkingMinBudget: 1024, ThinkingMaxBudget: 64000, ThinkingZeroAllowed: true, ThinkingDynamic: true},
+		{ID: "claude-sonnet-4.6", DisplayName: "Claude Sonnet 4.6", Description: "Anthropic Claude Sonnet 4.6 via GitHub Copilot", ContextLength: 200000, MaxCompletionTokens: 32000, SupportedEndpoints: []string{"/chat/completions", "/v1/messages"}, ThinkingLevels: []string{"low", "medium", "high"}, ThinkingMinBudget: 1024, ThinkingMaxBudget: 32000, ThinkingZeroAllowed: true, ThinkingDynamic: true},
 		{ID: "gemini-3.1-pro-preview", DisplayName: "Gemini 3.1 Pro", Description: "Google Gemini 3.1 Pro via GitHub Copilot", ContextLength: 128000, MaxCompletionTokens: 64000, SupportedEndpoints: []string{"/chat/completions"}, ThinkingLevels: []string{"low", "medium", "high"}},
 		{ID: "gpt-5.2-codex", DisplayName: "GPT-5.2-Codex", Description: "OpenAI GPT-5.2-Codex via GitHub Copilot", ContextLength: 400000, MaxCompletionTokens: 128000, SupportedEndpoints: []string{"/responses"}, ThinkingLevels: []string{"low", "medium", "high"}},
 		{ID: "gpt-5.3-codex", DisplayName: "GPT-5.3-Codex", Description: "OpenAI GPT-5.3-Codex via GitHub Copilot", ContextLength: 400000, MaxCompletionTokens: 128000, SupportedEndpoints: []string{"/responses"}, ThinkingLevels: []string{"low", "medium", "high"}},
@@ -200,8 +206,15 @@ func GetGitHubCopilotModels() []*ModelInfo {
 		if len(def.SupportedEndpoints) > 0 {
 			m.SupportedEndpoints = append([]string(nil), def.SupportedEndpoints...)
 		}
-		if len(def.ThinkingLevels) > 0 {
-			m.Thinking = &ThinkingSupport{Levels: append([]string(nil), def.ThinkingLevels...)}
+		hasBudget := def.ThinkingMinBudget > 0 || def.ThinkingMaxBudget > 0
+		if len(def.ThinkingLevels) > 0 || hasBudget {
+			m.Thinking = &ThinkingSupport{
+				Levels:         append([]string(nil), def.ThinkingLevels...),
+				Min:            def.ThinkingMinBudget,
+				Max:            def.ThinkingMaxBudget,
+				ZeroAllowed:    def.ThinkingZeroAllowed,
+				DynamicAllowed: def.ThinkingDynamic,
+			}
 		}
 		models = append(models, m)
 	}

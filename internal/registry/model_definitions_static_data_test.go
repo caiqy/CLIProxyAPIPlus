@@ -170,3 +170,52 @@ func TestGetGitHubCopilotModels_ClaudeSonnet4SupportsThinking(t *testing.T) {
 		t.Fatal("claude-sonnet-4 should support thinking")
 	}
 }
+
+func TestGetGitHubCopilotModels_ClaudeOpus46IsHybridCapability(t *testing.T) {
+	models := GetGitHubCopilotModels()
+	var target *ModelInfo
+	for _, m := range models {
+		if m != nil && m.ID == "claude-opus-4.6" {
+			target = m
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("claude-opus-4.6 not found in copilot models")
+	}
+	if target.Thinking == nil {
+		t.Fatal("claude-opus-4.6 should support thinking")
+	}
+	if len(target.Thinking.Levels) == 0 {
+		t.Fatal("claude-opus-4.6 should have thinking levels (adaptive)")
+	}
+	if target.Thinking.Max == 0 {
+		t.Fatal("claude-opus-4.6 should have thinking budget max (hybrid)")
+	}
+	if target.Thinking.Min == 0 {
+		t.Fatal("claude-opus-4.6 should have thinking budget min (hybrid)")
+	}
+}
+
+func TestGetGitHubCopilotModels_ClaudeSonnet46IsHybridCapability(t *testing.T) {
+	models := GetGitHubCopilotModels()
+	var target *ModelInfo
+	for _, m := range models {
+		if m != nil && m.ID == "claude-sonnet-4.6" {
+			target = m
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("claude-sonnet-4.6 not found in copilot models")
+	}
+	if target.Thinking == nil {
+		t.Fatal("claude-sonnet-4.6 should support thinking")
+	}
+	if len(target.Thinking.Levels) == 0 {
+		t.Fatal("claude-sonnet-4.6 should have thinking levels (adaptive)")
+	}
+	if target.Thinking.Max == 0 {
+		t.Fatal("claude-sonnet-4.6 should have thinking budget max (hybrid)")
+	}
+}
