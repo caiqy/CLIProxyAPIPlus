@@ -1065,3 +1065,103 @@ func TestInjectFakeAssistantMessage_XInitiatorBecomesAgent(t *testing.T) {
 		t.Fatal("containsAgentConversationRole = false after injection, want true")
 	}
 }
+
+// --- Integration tests for Execute with force-agent-initiator ---
+
+func TestExecute_ForceAgentInitiator_InjectsAssistantAndSetsHeader(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody []byte
+	var capturedInitiator string
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		capturedInitiator = r.Header.Get("X-Initiator")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"x","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+		}, nil
+	}))
+
+	cfg := &config.Config{}
+	cfg.GitHubCopilot.ForceAgentInitiator = true
+	cfg.GitHubCopilot.FakeAssistantContent = "Understood."
+
+	e := NewGitHubCopilotExecutor(cfg)
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
+
+	_, err := e.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if capturedInitiator != "agent" {
+		t.Fatalf("X-Initiator = %q, want agent", capturedInitiator)
+	}
+	msgs := gjson.GetBytes(capturedBody, "messages").Array()
+	hasAssistant := false
+	for _, m := range msgs {
+		if m.Get("role").String() == "assistant" {
+			hasAssistant = true
+			break
+		}
+	}
+	if !hasAssistant {
+		t.Fatalf("upstream body has no assistant message, body = %s", capturedBody)
+	}
+}
+
+func TestExecute_ForceAgentInitiator_Disabled_NoInjection(t *testing.T) {
+	t.Parallel()
+
+	var capturedInitiator string
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		capturedInitiator = r.Header.Get("X-Initiator")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"x","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+		}, nil
+	}))
+
+	cfg := &config.Config{}
+	cfg.GitHubCopilot.ForceAgentInitiator = false
+
+	e := NewGitHubCopilotExecutor(cfg)
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
+
+	_, err := e.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if capturedInitiator != "user" {
+		t.Fatalf("X-Initiator = %q, want user (feature disabled)", capturedInitiator)
+	}
+}

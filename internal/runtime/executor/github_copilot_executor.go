@@ -196,6 +196,12 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	}
 	body, _ = sjson.SetBytes(body, "stream", false)
 
+	// Inject a fake assistant message when force-agent-initiator is enabled and
+	// the request body has no agent role (would otherwise produce X-Initiator: user).
+	if e.cfg.GitHubCopilot.ForceAgentInitiator && !containsAgentConversationRole(body) {
+		body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useMessages, useResponses)
+	}
+
 	path := selectGitHubCopilotEndpoint(from, req.Model)
 	url := baseURL + path
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
