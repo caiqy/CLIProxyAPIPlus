@@ -16,6 +16,11 @@ type oaiToResponsesStateReasoning struct {
 	ReasoningID   string
 	ReasoningData string
 }
+type oaiToResponsesCompletedFunc struct {
+	CallID string
+	Name   string
+	Args   string
+}
 type oaiToResponsesState struct {
 	Seq            int
 	ResponseID     string
@@ -31,6 +36,9 @@ type oaiToResponsesState struct {
 	FuncArgsBuf  map[int]*strings.Builder // index -> args
 	FuncNames    map[int]string           // index -> name
 	FuncCallIDs  map[int]string           // index -> call_id
+	// CompletedFuncs stores tool calls that were flushed when a new ID appeared at the same index.
+	// This handles Copilot Gemini models which send multiple complete tool calls all with index=0.
+	CompletedFuncs []oaiToResponsesCompletedFunc
 	// message item state per output index
 	MsgItemAdded    map[int]bool // whether response.output_item.added emitted for message
 	MsgContentAdded map[int]bool // whether response.content_part.added emitted for message
@@ -137,6 +145,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.FuncArgsBuf = make(map[int]*strings.Builder)
 		st.FuncNames = make(map[int]string)
 		st.FuncCallIDs = make(map[int]string)
+		st.CompletedFuncs = nil
 		st.MsgItemAdded = make(map[int]bool)
 		st.MsgContentAdded = make(map[int]bool)
 		st.MsgItemDone = make(map[int]bool)
@@ -232,8 +241,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					st.MsgTextBuf[idx].WriteString(c.String())
 				}
 
-				// reasoning_content (OpenAI reasoning incremental text)
-				if rc := delta.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
+				// reasoning_content / reasoning_text (OpenAI reasoning incremental text).
+				// Gemini on Copilot emits delta.reasoning_text, while standard OpenAI
+				// emits delta.reasoning_content. Support both.
+				for _, rcField := range []string{"reasoning_content", "reasoning_text"} {
+					rc := delta.Get(rcField)
+					if !rc.Exists() || rc.String() == "" {
+						continue
+					}
 					// On first appearance, add reasoning item and part
 					if st.ReasoningID == "" {
 						st.ReasoningID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
@@ -297,55 +312,95 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						st.MsgItemDone[idx] = true
 					}
 
-					// Only emit item.added once per tool call and preserve call_id across chunks.
-					newCallID := tcs.Get("0.id").String()
-					nameChunk := tcs.Get("0.function.name").String()
-					if nameChunk != "" {
-						st.FuncNames[idx] = nameChunk
-					}
-					existingCallID := st.FuncCallIDs[idx]
-					effectiveCallID := existingCallID
-					shouldEmitItem := false
-					if existingCallID == "" && newCallID != "" {
-						// First time seeing a valid call_id for this index
-						effectiveCallID = newCallID
-						st.FuncCallIDs[idx] = newCallID
-						shouldEmitItem = true
-					}
+					// tool_calls may contain multiple calls. Track each by its tool_call.index.
+					tcs.ForEach(func(_, tc gjson.Result) bool {
+						tcIndex := int(tc.Get("index").Int())
+						// Allocate a deterministic output_index namespace for tool calls so they
+						// don't collide with message output_index (= choice index).
+						// NOTE: This assumes a single choice won't exceed 1000 tool call indices.
+						funcIdx := (idx + 1) * 1000
+						funcIdx += tcIndex
 
-					if shouldEmitItem && effectiveCallID != "" {
-						o := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`
-						o, _ = sjson.Set(o, "sequence_number", nextSeq())
-						o, _ = sjson.Set(o, "output_index", idx)
-						o, _ = sjson.Set(o, "item.id", fmt.Sprintf("fc_%s", effectiveCallID))
-						o, _ = sjson.Set(o, "item.call_id", effectiveCallID)
-						name := st.FuncNames[idx]
-						o, _ = sjson.Set(o, "item.name", name)
-						out = append(out, emitRespEvent("response.output_item.added", o))
-					}
+						newCallID := tc.Get("id").String()
+						nameChunk := tc.Get("function.name").String()
+						argsChunk := tc.Get("function.arguments").String()
 
-					// Ensure args buffer exists for this index
-					if st.FuncArgsBuf[idx] == nil {
-						st.FuncArgsBuf[idx] = &strings.Builder{}
-					}
+						existingCallID := st.FuncCallIDs[funcIdx]
 
-					// Append arguments delta if available and we have a valid call_id to reference
-					if args := tcs.Get("0.function.arguments"); args.Exists() && args.String() != "" {
-						// Prefer an already known call_id; fall back to newCallID if first time
-						refCallID := st.FuncCallIDs[idx]
-						if refCallID == "" {
-							refCallID = newCallID
+						// Copilot Gemini models can reuse the same tcIndex (often 0) for multiple
+						// complete tool calls across chunks. Flush when a new id appears.
+						if existingCallID != "" && newCallID != "" && existingCallID != newCallID {
+							oldArgs := "{}"
+							if b := st.FuncArgsBuf[funcIdx]; b != nil && b.Len() > 0 {
+								oldArgs = b.String()
+							}
+							fcDone := `{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`
+							fcDone, _ = sjson.Set(fcDone, "sequence_number", nextSeq())
+							fcDone, _ = sjson.Set(fcDone, "item_id", fmt.Sprintf("fc_%s", existingCallID))
+							fcDone, _ = sjson.Set(fcDone, "output_index", funcIdx)
+							fcDone, _ = sjson.Set(fcDone, "arguments", oldArgs)
+							out = append(out, emitRespEvent("response.function_call_arguments.done", fcDone))
+
+							itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`
+							itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
+							itemDone, _ = sjson.Set(itemDone, "output_index", funcIdx)
+							itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("fc_%s", existingCallID))
+							itemDone, _ = sjson.Set(itemDone, "item.arguments", oldArgs)
+							itemDone, _ = sjson.Set(itemDone, "item.call_id", existingCallID)
+							itemDone, _ = sjson.Set(itemDone, "item.name", st.FuncNames[funcIdx])
+							out = append(out, emitRespEvent("response.output_item.done", itemDone))
+
+							st.CompletedFuncs = append(st.CompletedFuncs, oaiToResponsesCompletedFunc{CallID: existingCallID, Name: st.FuncNames[funcIdx], Args: oldArgs})
+
+							st.FuncCallIDs[funcIdx] = ""
+							st.FuncNames[funcIdx] = ""
+							st.FuncArgsBuf[funcIdx] = &strings.Builder{}
+							existingCallID = ""
 						}
-						if refCallID != "" {
-							ad := `{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`
-							ad, _ = sjson.Set(ad, "sequence_number", nextSeq())
-							ad, _ = sjson.Set(ad, "item_id", fmt.Sprintf("fc_%s", refCallID))
-							ad, _ = sjson.Set(ad, "output_index", idx)
-							ad, _ = sjson.Set(ad, "delta", args.String())
-							out = append(out, emitRespEvent("response.function_call_arguments.delta", ad))
+
+						if nameChunk != "" {
+							st.FuncNames[funcIdx] = nameChunk
 						}
-						st.FuncArgsBuf[idx].WriteString(args.String())
-					}
+						effectiveCallID := existingCallID
+						shouldEmitItem := false
+						if existingCallID == "" && newCallID != "" {
+							effectiveCallID = newCallID
+							st.FuncCallIDs[funcIdx] = newCallID
+							shouldEmitItem = true
+						}
+
+						if shouldEmitItem && effectiveCallID != "" {
+							o := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`
+							o, _ = sjson.Set(o, "sequence_number", nextSeq())
+							o, _ = sjson.Set(o, "output_index", funcIdx)
+							o, _ = sjson.Set(o, "item.id", fmt.Sprintf("fc_%s", effectiveCallID))
+							o, _ = sjson.Set(o, "item.call_id", effectiveCallID)
+							o, _ = sjson.Set(o, "item.name", st.FuncNames[funcIdx])
+							out = append(out, emitRespEvent("response.output_item.added", o))
+						}
+
+						if st.FuncArgsBuf[funcIdx] == nil {
+							st.FuncArgsBuf[funcIdx] = &strings.Builder{}
+						}
+
+						if argsChunk != "" {
+							refCallID := st.FuncCallIDs[funcIdx]
+							if refCallID == "" {
+								refCallID = newCallID
+							}
+							if refCallID != "" {
+								ad := `{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`
+								ad, _ = sjson.Set(ad, "sequence_number", nextSeq())
+								ad, _ = sjson.Set(ad, "item_id", fmt.Sprintf("fc_%s", refCallID))
+								ad, _ = sjson.Set(ad, "output_index", funcIdx)
+								ad, _ = sjson.Set(ad, "delta", argsChunk)
+								out = append(out, emitRespEvent("response.function_call_arguments.delta", ad))
+							}
+							st.FuncArgsBuf[funcIdx].WriteString(argsChunk)
+						}
+
+						return true
+					})
 				}
 			}
 
@@ -547,6 +602,16 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 					}
 				}
+				// Append previously completed function calls (flushed due to ID collision at same index)
+				for _, cf := range st.CompletedFuncs {
+					item := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
+					item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", cf.CallID))
+					item, _ = sjson.Set(item, "arguments", cf.Args)
+					item, _ = sjson.Set(item, "call_id", cf.CallID)
+					item, _ = sjson.Set(item, "name", cf.Name)
+					outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+				}
+				// Append still-active function call accumulators
 				if len(st.FuncArgsBuf) > 0 {
 					idxs := make([]int, 0, len(st.FuncArgsBuf))
 					for i := range st.FuncArgsBuf {
@@ -700,8 +765,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 
 	// Build output list from choices[...]
 	outputsWrapper := `{"arr":[]}`
-	// Detect and capture reasoning content if present
+	// Detect and capture reasoning content if present.
+	// Gemini on Copilot emits reasoning_text, while standard OpenAI emits
+	// reasoning_content. Support both.
 	rcText := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content").String()
+	if rcText == "" {
+		rcText = gjson.GetBytes(rawJSON, "choices.0.message.reasoning_text").String()
+	}
 	includeReasoning := rcText != ""
 	if !includeReasoning && len(requestRawJSON) > 0 {
 		includeReasoning = gjson.GetBytes(requestRawJSON, "reasoning").Exists()

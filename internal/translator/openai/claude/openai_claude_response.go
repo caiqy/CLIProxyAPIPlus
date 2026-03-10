@@ -217,6 +217,33 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 				param.SawToolCall = true
 				index := int(toolCall.Get("index").Int())
+
+				// Copilot Gemini models send multiple complete tool calls all with
+				// index=0. Detect when a NEW id arrives at an index that already has
+				// an accumulator with a DIFFERENT id. When this happens, flush the
+				// existing tool call (emit its arguments + content_block_stop) and
+				// start fresh.
+				if existing, exists := param.ToolCallsAccumulator[index]; exists {
+					newID := toolCall.Get("id").String()
+					if newID != "" && existing.ID != "" && newID != existing.ID {
+						oldBlockIndex := param.toolContentBlockIndex(index)
+						// Emit accumulated arguments for the old tool call
+						if existing.Arguments.Len() > 0 {
+							inputDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
+							inputDeltaJSON, _ = sjson.Set(inputDeltaJSON, "index", oldBlockIndex)
+							inputDeltaJSON, _ = sjson.Set(inputDeltaJSON, "delta.partial_json", util.FixJSON(existing.Arguments.String()))
+							results = append(results, "event: content_block_delta\ndata: "+inputDeltaJSON+"\n\n")
+						}
+						// Close the old tool_use block
+						contentBlockStopJSON := `{"type":"content_block_stop","index":0}`
+						contentBlockStopJSON, _ = sjson.Set(contentBlockStopJSON, "index", oldBlockIndex)
+						results = append(results, "event: content_block_stop\ndata: "+contentBlockStopJSON+"\n\n")
+						// Remove old entry so a new accumulator and blockIndex will be allocated below.
+						delete(param.ToolCallsAccumulator, index)
+						delete(param.ToolCallBlockIndexes, index)
+					}
+				}
+
 				blockIndex := param.toolContentBlockIndex(index)
 
 				// Initialize accumulator if needed
@@ -285,7 +312,18 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 		// Send content_block_stop for any tool calls
 		if !param.ContentBlocksStopped {
+			idxs := make([]int, 0, len(param.ToolCallsAccumulator))
 			for index := range param.ToolCallsAccumulator {
+				idxs = append(idxs, index)
+			}
+			for i := 0; i < len(idxs); i++ {
+				for j := i + 1; j < len(idxs); j++ {
+					if idxs[j] < idxs[i] {
+						idxs[i], idxs[j] = idxs[j], idxs[i]
+					}
+				}
+			}
+			for _, index := range idxs {
 				accumulator := param.ToolCallsAccumulator[index]
 				blockIndex := param.toolContentBlockIndex(index)
 
@@ -349,7 +387,18 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	stopTextContentBlock(param, &results)
 
 	if !param.ContentBlocksStopped {
+		idxs := make([]int, 0, len(param.ToolCallsAccumulator))
 		for index := range param.ToolCallsAccumulator {
+			idxs = append(idxs, index)
+		}
+		for i := 0; i < len(idxs); i++ {
+			for j := i + 1; j < len(idxs); j++ {
+				if idxs[j] < idxs[i] {
+					idxs[i], idxs[j] = idxs[j], idxs[i]
+				}
+			}
+		}
+		for _, index := range idxs {
 			accumulator := param.ToolCallsAccumulator[index]
 			blockIndex := param.toolContentBlockIndex(index)
 

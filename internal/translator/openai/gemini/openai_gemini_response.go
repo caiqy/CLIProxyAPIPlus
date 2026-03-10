@@ -18,12 +18,23 @@ import (
 
 // ConvertOpenAIResponseToGeminiParams holds parameters for response conversion
 type ConvertOpenAIResponseToGeminiParams struct {
-	// Tool calls accumulator for streaming
+	// Tool calls accumulator for streaming (keyed by OpenAI index for standard incremental deltas)
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
+	// CompletedToolCalls stores tool calls that were flushed when a new ID appeared at the same index.
+	// This handles Copilot Gemini models which send multiple complete tool calls all with index=0.
+	CompletedToolCalls []*ToolCallAccumulator
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder
 	// Track if this is the first chunk
 	IsFirstChunk bool
+
+	// Track latest non-zero usage so we can attach it to finish_reason chunks
+	// even when the provider doesn't include usage in the terminal chunk.
+	UsageSeen                 bool
+	UsagePromptTokenCount     int64
+	UsageCandidatesTokenCount int64
+	UsageTotalTokenCount      int64
+	UsageThoughtsTokenCount   int64
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -50,7 +61,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 		*param = &ConvertOpenAIResponseToGeminiParams{
 			ToolCallsAccumulator: nil,
 			ContentAccumulator:   strings.Builder{},
-			IsFirstChunk:         false,
+			IsFirstChunk:         true,
 		}
 	}
 
@@ -64,10 +75,26 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 	}
 
 	root := gjson.ParseBytes(rawJSON)
+	p := (*param).(*ConvertOpenAIResponseToGeminiParams)
+
+	// Track latest non-zero usage from any chunk.
+	if usage := root.Get("usage"); usage.Exists() {
+		prompt := usage.Get("prompt_tokens").Int()
+		cand := usage.Get("completion_tokens").Int()
+		total := usage.Get("total_tokens").Int()
+		thoughts := reasoningTokensFromUsage(usage)
+		if prompt > 0 || cand > 0 || total > 0 || thoughts > 0 {
+			p.UsageSeen = true
+			p.UsagePromptTokenCount = prompt
+			p.UsageCandidatesTokenCount = cand
+			p.UsageTotalTokenCount = total
+			p.UsageThoughtsTokenCount = thoughts
+		}
+	}
 
 	// Initialize accumulators if needed
-	if (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator == nil {
-		(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
+	if p.ToolCallsAccumulator == nil {
+		p.ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 	}
 
 	// Process choices
@@ -110,17 +137,17 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 			baseTemplate := template
 
 			// Handle role (only in first chunk)
-			if role := delta.Get("role"); role.Exists() && (*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk {
+			if role := delta.Get("role"); role.Exists() && p.IsFirstChunk {
 				// OpenAI assistant -> Gemini model
 				if role.String() == "assistant" {
 					template, _ = sjson.Set(template, "candidates.0.content.role", "model")
 				}
-				(*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk = false
-				results = append(results, template)
-				return true
+				p.IsFirstChunk = false
 			}
 
 			var chunkOutputs []string
+			sawToolCallsDelta := false
+			emittedDelta := false
 
 			// Handle reasoning/thinking delta.
 			// Gemini on Copilot emits delta.reasoning_text, while OpenAI emits
@@ -138,7 +165,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 			// Handle content delta
 			if content := delta.Get("content"); content.Exists() && content.String() != "" {
 				contentText := content.String()
-				(*param).(*ConvertOpenAIResponseToGeminiParams).ContentAccumulator.WriteString(contentText)
+				p.ContentAccumulator.WriteString(contentText)
 
 				// Create text part for this delta
 				contentTemplate := baseTemplate
@@ -146,13 +173,9 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 				chunkOutputs = append(chunkOutputs, contentTemplate)
 			}
 
-			if len(chunkOutputs) > 0 {
-				results = append(results, chunkOutputs...)
-				return true
-			}
-
-			// Handle tool calls delta
+			// Handle tool calls delta (accumulate; emit on finish_reason)
 			if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+				sawToolCallsDelta = true
 				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 					toolIndex := int(toolCall.Get("index").Int())
 					toolID := toolCall.Get("id").String()
@@ -172,15 +195,30 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					functionName := function.Get("name").String()
 					functionArgs := function.Get("arguments").String()
 
+					// Copilot Gemini models send multiple complete tool calls all with
+					// index=0. Detect this by checking if a NEW id arrives at an index
+					// that already has an accumulator with a DIFFERENT id. When this
+					// happens, flush the existing entry to CompletedToolCalls and start
+					// a fresh accumulator for the new tool call.
+					if existing, exists := p.ToolCallsAccumulator[toolIndex]; exists {
+						if toolID != "" && existing.ID != "" && toolID != existing.ID {
+							p.CompletedToolCalls = append(p.CompletedToolCalls, existing)
+							p.ToolCallsAccumulator[toolIndex] = &ToolCallAccumulator{
+								ID:   toolID,
+								Name: functionName,
+							}
+						}
+					}
+
 					// Initialize accumulator if needed so later deltas without type can append arguments.
-					if _, exists := (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex]; !exists {
-						(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex] = &ToolCallAccumulator{
+					if _, exists := p.ToolCallsAccumulator[toolIndex]; !exists {
+						p.ToolCallsAccumulator[toolIndex] = &ToolCallAccumulator{
 							ID:   toolID,
 							Name: functionName,
 						}
 					}
 
-					acc := (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex]
+					acc := p.ToolCallsAccumulator[toolIndex]
 
 					// Update ID if provided
 					if toolID != "" {
@@ -199,20 +237,44 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 					return true
 				})
-
-				// Don't output anything for tool call deltas - wait for completion
-				return true
 			}
 
-			// Handle finish reason
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+			if len(chunkOutputs) > 0 {
+				results = append(results, chunkOutputs...)
+				emittedDelta = true
+			}
+
+			// Handle finish reason. Ignore null/empty finish_reason which appears on
+			// intermediate OpenAI streaming chunks.
+			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "" {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
 				template, _ = sjson.Set(template, "candidates.0.finishReason", geminiFinishReason)
 
-				// If we have accumulated tool calls, output them now
-				if len((*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator) > 0 {
+				// Collect all tool calls: previously completed (flushed due to ID
+				// collision at same index) plus still-active accumulators.
+				allToolCalls := make([]*ToolCallAccumulator, 0, len(p.CompletedToolCalls)+len(p.ToolCallsAccumulator))
+				allToolCalls = append(allToolCalls, p.CompletedToolCalls...)
+				// Append still-active accumulators in deterministic index order.
+				if len(p.ToolCallsAccumulator) > 0 {
+					idxs := make([]int, 0, len(p.ToolCallsAccumulator))
+					for i := range p.ToolCallsAccumulator {
+						idxs = append(idxs, i)
+					}
+					for i := 0; i < len(idxs); i++ {
+						for j := i + 1; j < len(idxs); j++ {
+							if idxs[j] < idxs[i] {
+								idxs[i], idxs[j] = idxs[j], idxs[i]
+							}
+						}
+					}
+					for _, i := range idxs {
+						allToolCalls = append(allToolCalls, p.ToolCallsAccumulator[i])
+					}
+				}
+
+				if len(allToolCalls) > 0 {
 					partIndex := 0
-					for _, accumulator := range (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator {
+					for _, accumulator := range allToolCalls {
 						namePath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.name", partIndex)
 						argsPath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.args", partIndex)
 						template, _ = sjson.Set(template, namePath, accumulator.Name)
@@ -221,10 +283,46 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					}
 
 					// Clear accumulators
-					(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
+					p.CompletedToolCalls = nil
+					p.ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
+				}
+
+				// Attach usage metadata. Prefer usage in the finish chunk; otherwise fall back
+				// to the latest non-zero usage observed earlier in the stream.
+				if usage := root.Get("usage"); usage.Exists() {
+					prompt := usage.Get("prompt_tokens").Int()
+					cand := usage.Get("completion_tokens").Int()
+					total := usage.Get("total_tokens").Int()
+					thoughts := reasoningTokensFromUsage(usage)
+					if prompt > 0 || cand > 0 || total > 0 || thoughts > 0 {
+						template, _ = sjson.Set(template, "usageMetadata.promptTokenCount", prompt)
+						template, _ = sjson.Set(template, "usageMetadata.candidatesTokenCount", cand)
+						template, _ = sjson.Set(template, "usageMetadata.totalTokenCount", total)
+						if thoughts > 0 {
+							template, _ = sjson.Set(template, "usageMetadata.thoughtsTokenCount", thoughts)
+						}
+					}
+				} else if p.UsageSeen {
+					template, _ = sjson.Set(template, "usageMetadata.promptTokenCount", p.UsagePromptTokenCount)
+					template, _ = sjson.Set(template, "usageMetadata.candidatesTokenCount", p.UsageCandidatesTokenCount)
+					template, _ = sjson.Set(template, "usageMetadata.totalTokenCount", p.UsageTotalTokenCount)
+					if p.UsageThoughtsTokenCount > 0 {
+						template, _ = sjson.Set(template, "usageMetadata.thoughtsTokenCount", p.UsageThoughtsTokenCount)
+					}
 				}
 
 				results = append(results, template)
+				return true
+			}
+
+			// If we emitted any delta output for this chunk, don't emit additional usage-only
+			// chunks (some providers include usage with every chunk, often zeros).
+			if emittedDelta {
+				return true
+			}
+
+			// If this chunk only carried tool call deltas, don't emit an output chunk.
+			if sawToolCallsDelta {
 				return true
 			}
 
