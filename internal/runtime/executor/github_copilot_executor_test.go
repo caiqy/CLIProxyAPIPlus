@@ -1087,6 +1087,8 @@ func TestExecute_ForceAgentInitiator_InjectsAssistantAndSetsHeader(t *testing.T)
 	cfg := &config.Config{}
 	cfg.GitHubCopilot.ForceAgentInitiator = true
 	cfg.GitHubCopilot.FakeAssistantContent = "Understood."
+	cfg.SDKConfig.UpstreamTimeouts.ConnectTimeoutSeconds = 91
+	cfg.SDKConfig.UpstreamTimeouts.ResponseHeaderTimeoutSeconds = 92
 
 	e := NewGitHubCopilotExecutor(cfg)
 	e.cache["gh-access"] = &cachedAPIToken{
@@ -1140,6 +1142,8 @@ func TestExecute_ForceAgentInitiator_Disabled_NoInjection(t *testing.T) {
 
 	cfg := &config.Config{}
 	cfg.GitHubCopilot.ForceAgentInitiator = false
+	cfg.SDKConfig.UpstreamTimeouts.ConnectTimeoutSeconds = 93
+	cfg.SDKConfig.UpstreamTimeouts.ResponseHeaderTimeoutSeconds = 94
 
 	e := NewGitHubCopilotExecutor(cfg)
 	e.cache["gh-access"] = &cachedAPIToken{
@@ -1184,6 +1188,8 @@ func TestExecuteStream_ForceAgentInitiator_InjectsAssistant(t *testing.T) {
 
 	cfg := &config.Config{}
 	cfg.GitHubCopilot.ForceAgentInitiator = true
+	cfg.SDKConfig.UpstreamTimeouts.ConnectTimeoutSeconds = 95
+	cfg.SDKConfig.UpstreamTimeouts.ResponseHeaderTimeoutSeconds = 96
 
 	e := NewGitHubCopilotExecutor(cfg)
 	e.cache["gh-access"] = &cachedAPIToken{
