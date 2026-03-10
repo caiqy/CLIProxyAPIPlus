@@ -658,3 +658,66 @@ func TestChatCompletionsBodyDoesNotInjectStreamOptions(t *testing.T) {
 		t.Fatalf("chat/completions body must NOT contain stream_options, got: %s", capturedBody)
 	}
 }
+
+func TestGitHubCopilotMessagesStream_ClaudeToClaude_AppendsNewlinePerLine(t *testing.T) {
+	// This simulates the upstream Copilot /v1/messages SSE where the stream is already
+	// in Claude format. When the incoming request is also Claude, the executor should
+	// forward the SSE line-by-line while preserving SSE framing (i.e., add back '\n'
+	// removed by bufio.Scanner).
+	upstream := strings.Join([]string{
+		"event: message_start",
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-6\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}",
+		"",
+		"event: content_block_delta",
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}",
+		"",
+		"event: message_stop",
+		"data: {\"type\":\"message_stop\"}",
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstream)),
+		}, nil
+	}))
+
+	e := NewGitHubCopilotExecutor(&config.Config{SDKConfig: config.SDKConfig{UpstreamTimeouts: config.UpstreamTimeouts{
+		ConnectTimeoutSeconds:        17,
+		ResponseHeaderTimeoutSeconds: 47,
+	}}})
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"claude-opus-4-6","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+
+	stream, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4-6",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	// The first chunk should be a complete SSE line ending with '\n'.
+	first, ok := <-stream.Chunks
+	if !ok {
+		t.Fatal("expected at least one stream chunk")
+	}
+	if first.Err != nil {
+		t.Fatalf("first chunk error = %v", first.Err)
+	}
+	if !bytes.HasSuffix(first.Payload, []byte("\n")) {
+		t.Fatalf("first chunk must end with newline; got %q", string(first.Payload))
+	}
+}

@@ -419,6 +419,17 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				}
 			}
 
+			// When we are using the Copilot Claude /v1/messages endpoint and the downstream
+			// client is also Claude, we should forward SSE lines directly. bufio.Scanner
+			// drops the trailing '\n', so we add it back to preserve SSE framing.
+			if useMessages && from == to {
+				cloned := make([]byte, len(line)+1)
+				copy(cloned, line)
+				cloned[len(line)] = '\n'
+				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
+				continue
+			}
+
 			var chunks []string
 			if useResponses && from.String() == "claude" {
 				chunks = translateGitHubCopilotResponsesStreamToClaude(bytes.Clone(line), &param)
