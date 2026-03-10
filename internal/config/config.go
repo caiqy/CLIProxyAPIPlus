@@ -118,6 +118,9 @@ type Config struct {
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
+	// GitHubCopilot holds behavioral overrides specific to the GitHub Copilot executor.
+	GitHubCopilot GitHubCopilotConfig `yaml:"github-copilot" json:"github-copilot"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
@@ -252,6 +255,19 @@ type AmpCode struct {
 	// ForceModelMappings when true, model mappings take precedence over local API keys.
 	// When false (default), local API keys are used first if available.
 	ForceModelMappings bool `yaml:"force-model-mappings" json:"force-model-mappings"`
+}
+
+// GitHubCopilotConfig holds behavioral overrides for the GitHub Copilot executor.
+type GitHubCopilotConfig struct {
+	// ForceAgentInitiator injects a fake assistant message into requests that
+	// contain no assistant/tool turns, causing X-Initiator to be set to "agent".
+	// The injected message is placed immediately before the last user turn.
+	// Default: false.
+	ForceAgentInitiator bool `yaml:"force-agent-initiator" json:"force-agent-initiator"`
+
+	// FakeAssistantContent is the text content of the injected assistant message.
+	// Defaults to "OK." if empty.
+	FakeAssistantContent string `yaml:"fake-assistant-content,omitempty" json:"fake-assistant-content,omitempty"`
 }
 
 // AmpUpstreamAPIKeyEntry maps a set of client API keys to a specific upstream API key.
