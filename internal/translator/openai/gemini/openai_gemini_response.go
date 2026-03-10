@@ -122,17 +122,17 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 			var chunkOutputs []string
 
-			// Handle reasoning/thinking delta
-			if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
-				for _, reasoningText := range extractReasoningTexts(reasoning) {
-					if reasoningText == "" {
-						continue
-					}
-					reasoningTemplate := baseTemplate
-					reasoningTemplate, _ = sjson.Set(reasoningTemplate, "candidates.0.content.parts.0.thought", true)
-					reasoningTemplate, _ = sjson.Set(reasoningTemplate, "candidates.0.content.parts.0.text", reasoningText)
-					chunkOutputs = append(chunkOutputs, reasoningTemplate)
+			// Handle reasoning/thinking delta.
+			// Gemini on Copilot emits delta.reasoning_text, while OpenAI emits
+			// delta.reasoning_content. Support both.
+			for _, reasoningText := range collectReasoningTextsFromFields(delta, "reasoning_content", "reasoning_text") {
+				if reasoningText == "" {
+					continue
 				}
+				reasoningTemplate := baseTemplate
+				reasoningTemplate, _ = sjson.Set(reasoningTemplate, "candidates.0.content.parts.0.thought", true)
+				reasoningTemplate, _ = sjson.Set(reasoningTemplate, "candidates.0.content.parts.0.text", reasoningText)
+				chunkOutputs = append(chunkOutputs, reasoningTemplate)
 			}
 
 			// Handle content delta
@@ -558,16 +558,16 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 
 			partIndex := 0
 
-			// Handle reasoning content before visible text
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
-				for _, reasoningText := range extractReasoningTexts(reasoning) {
-					if reasoningText == "" {
-						continue
-					}
-					out, _ = sjson.Set(out, fmt.Sprintf("candidates.0.content.parts.%d.thought", partIndex), true)
-					out, _ = sjson.Set(out, fmt.Sprintf("candidates.0.content.parts.%d.text", partIndex), reasoningText)
-					partIndex++
+			// Handle reasoning content before visible text.
+			// Gemini on Copilot emits reasoning_text, while OpenAI emits
+			// reasoning_content. Support both.
+			for _, reasoningText := range collectReasoningTextsFromFields(message, "reasoning_content", "reasoning_text") {
+				if reasoningText == "" {
+					continue
 				}
+				out, _ = sjson.Set(out, fmt.Sprintf("candidates.0.content.parts.%d.thought", partIndex), true)
+				out, _ = sjson.Set(out, fmt.Sprintf("candidates.0.content.parts.%d.text", partIndex), reasoningText)
+				partIndex++
 			}
 
 			// Handle content first
@@ -634,6 +634,27 @@ func reasoningTokensFromUsage(usage gjson.Result) int64 {
 		}
 	}
 	return 0
+}
+
+// collectReasoningTextsFromFields extracts reasoning texts from multiple possible field names
+// in a parent JSON node. This handles both OpenAI's "reasoning_content" and Gemini-on-Copilot's
+// "reasoning_text" fields.
+func collectReasoningTextsFromFields(parent gjson.Result, fields ...string) []string {
+	var texts []string
+	if !parent.Exists() {
+		return texts
+	}
+	for _, field := range fields {
+		if field == "" {
+			continue
+		}
+		node := parent.Get(field)
+		if !node.Exists() {
+			continue
+		}
+		texts = append(texts, extractReasoningTexts(node)...)
+	}
+	return texts
 }
 
 func extractReasoningTexts(node gjson.Result) []string {
