@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 type fixedRoundTripper struct{}
@@ -372,5 +373,38 @@ func TestNewProxyAwareHTTPClient_ContextRoundTripperOverridesCache(t *testing.T)
 	client := newProxyAwareHTTPClient(ctx, cfg, nil, 0)
 	if client.Transport != customRT {
 		t.Fatalf("client.Transport = %T, want context RoundTripper %T", client.Transport, customRT)
+	}
+}
+
+func TestNewProxyAwareHTTPClient_PrefersAuthProxyURLOverGlobalProxy(t *testing.T) {
+	httpClientCacheMutex.Lock()
+	httpClientCache = make(map[string]*http.Client)
+	httpClientCacheMutex.Unlock()
+
+	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://global.proxy.local:8080"}}
+	auth := &cliproxyauth.Auth{ProxyURL: "http://auth.proxy.local:8081"}
+
+	client := newProxyAwareHTTPClient(context.Background(), cfg, auth, 0)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("expected proxy function to be configured")
+	}
+
+	req, errReq := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errReq != nil {
+		t.Fatalf("build request failed: %v", errReq)
+	}
+	proxyURL, errProxy := transport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("resolve transport proxy failed: %v", errProxy)
+	}
+	if proxyURL == nil {
+		t.Fatal("expected non-nil proxy url")
+	}
+	if proxyURL.Host != "auth.proxy.local:8081" {
+		t.Fatalf("expected auth proxy host auth.proxy.local:8081, got %s", proxyURL.Host)
 	}
 }
