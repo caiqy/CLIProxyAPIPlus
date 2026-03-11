@@ -24,8 +24,13 @@ type initiatorBypassManager struct {
 }
 
 type initiatorBypassBucketState struct {
-	NextEligibleAtUnix int64 `json:"next_eligible_at_unix"`
-	UpdatedAtUnix      int64 `json:"updated_at_unix"`
+	// Legacy second-level fields (kept for backward compatibility).
+	NextEligibleAtUnix int64 `json:"next_eligible_at_unix,omitempty"`
+	UpdatedAtUnix      int64 `json:"updated_at_unix,omitempty"`
+
+	// High-precision fields for sub-second windows.
+	NextEligibleAtUnixNano int64 `json:"next_eligible_at_unix_nano,omitempty"`
+	UpdatedAtUnixNano      int64 `json:"updated_at_unix_nano,omitempty"`
 }
 
 type initiatorBypassStateDisk struct {
@@ -55,23 +60,36 @@ func (m *initiatorBypassManager) ShouldBypass(model, apiToken string, hasAgentRo
 		return false
 	}
 	key := initiatorBypassBucketKey(model, apiToken)
-	now := m.now().Unix()
+	now := m.now()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if st, ok := m.buckets[key]; ok && now < st.NextEligibleAtUnix {
+	if st, ok := m.buckets[key]; ok && now.Before(st.nextEligibleAt()) {
 		return false
 	}
+	nextEligibleAt := now.Add(m.window)
 
 	m.buckets[key] = initiatorBypassBucketState{
-		NextEligibleAtUnix: now + int64(m.window/time.Second),
-		UpdatedAtUnix:      now,
+		NextEligibleAtUnix:     nextEligibleAt.Unix(),
+		UpdatedAtUnix:          now.Unix(),
+		NextEligibleAtUnixNano: nextEligibleAt.UnixNano(),
+		UpdatedAtUnixNano:      now.UnixNano(),
 	}
 	if err := m.persistLocked(); err != nil {
 		log.Warnf("github-copilot executor: persist initiator bypass state failed: %v", err)
 	}
 	return true
+}
+
+func (s initiatorBypassBucketState) nextEligibleAt() time.Time {
+	if s.NextEligibleAtUnixNano > 0 {
+		return time.Unix(0, s.NextEligibleAtUnixNano)
+	}
+	if s.NextEligibleAtUnix > 0 {
+		return time.Unix(s.NextEligibleAtUnix, 0)
+	}
+	return time.Unix(0, 0)
 }
 
 func (m *initiatorBypassManager) loadState() {
