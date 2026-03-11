@@ -1048,6 +1048,146 @@ func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_FixesMismat
 	}
 }
 
+func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_FixesMismatchedTextPartIDs(t *testing.T) {
+	// Copilot returns different item_id values for content_part.added vs
+	// output_text.delta (and done) events for the same text content part.
+	// Worse, each individual output_text.delta event can carry yet another
+	// different item_id.  The @ai-sdk/openai Responses provider registers a
+	// text part on content_part.added using its item_id, then looks it up by
+	// item_id in output_text.delta.  Mismatched IDs cause:
+	//   "text part <id> not found"
+	// The proxy must normalise the IDs so delta/done events use the same
+	// item_id that was seen in content_part.added.
+	contentPartAddedItemID := "K_UlBuLO_content_part_added_item_id"
+	deltaItemID1 := "c4Nz2lFt_delta_item_id_first"
+	deltaItemID2 := "K8MR66lL_delta_item_id_second"
+	outputTextDoneItemID := "hBY1Lidc_output_text_done_item_id"
+	contentPartDoneItemID := "1R0AbnAQ_content_part_done_item_id"
+
+	upstream := strings.Join([]string{
+		"event: response.created",
+		"",
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4","output":[]}}`,
+		"",
+		"event: response.output_item.added",
+		"",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg-added","role":"assistant","content":[]}}`,
+		"",
+		"event: response.content_part.added",
+		"",
+		`data: {"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","part":{"type":"output_text","text":""}}`,
+		"",
+		"event: response.output_text.delta",
+		"",
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"` + deltaItemID1 + `","delta":"hello"}`,
+		"",
+		"event: response.output_text.delta",
+		"",
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"` + deltaItemID2 + `","delta":" world"}`,
+		"",
+		"event: response.output_text.done",
+		"",
+		`data: {"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"` + outputTextDoneItemID + `","text":"hello world"}`,
+		"",
+		"event: response.content_part.done",
+		"",
+		`data: {"type":"response.content_part.done","output_index":0,"content_index":0,"item_id":"` + contentPartDoneItemID + `","part":{"type":"output_text","text":"hello world"}}`,
+		"",
+		"event: response.output_item.done",
+		"",
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-done","role":"assistant","content":[{"type":"output_text","text":"hello world"}]}}`,
+		"",
+		"event: response.completed",
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg-done","role":"assistant","content":[{"type":"output_text","text":"hello world"}]}]}}`,
+		"",
+	}, "\n")
+
+	// Expected: the proxy normalises all item_id fields in delta/done events
+	// to the item_id seen in content_part.added.
+	want := strings.Join([]string{
+		"event: response.created",
+		"",
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4","output":[]}}`,
+		"",
+		"event: response.output_item.added",
+		"",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg-added","role":"assistant","content":[]}}`,
+		"",
+		"event: response.content_part.added",
+		"",
+		`data: {"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","part":{"type":"output_text","text":""}}`,
+		"",
+		"event: response.output_text.delta",
+		"",
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","delta":"hello"}`,
+		"",
+		"event: response.output_text.delta",
+		"",
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","delta":" world"}`,
+		"",
+		"event: response.output_text.done",
+		"",
+		`data: {"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","text":"hello world"}`,
+		"",
+		"event: response.content_part.done",
+		"",
+		`data: {"type":"response.content_part.done","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","part":{"type":"output_text","text":"hello world"}}`,
+		"",
+		"event: response.output_item.done",
+		"",
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-done","role":"assistant","content":[{"type":"output_text","text":"hello world"}]}}`,
+		"",
+		"event: response.completed",
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg-done","role":"assistant","content":[{"type":"output_text","text":"hello world"}]}]}}`,
+		"",
+	}, "\n")
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstream)),
+		}, nil
+	}))
+
+	e := NewGitHubCopilotExecutor(&config.Config{SDKConfig: config.SDKConfig{UpstreamTimeouts: config.UpstreamTimeouts{
+		ConnectTimeoutSeconds:        17,
+		ResponseHeaderTimeoutSeconds: 47,
+	}}})
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+
+	stream, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var got bytes.Buffer
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+
+	if got.String() != want {
+		t.Fatalf("text part ID fixup mismatch\n--- got ---\n%s\n--- want ---\n%s", got.String(), want)
+	}
+}
+
 func TestGitHubCopilotExecute_BetasExtractedFromBodyIntoHeader(t *testing.T) {
 	t.Parallel()
 

@@ -421,11 +421,15 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		scanner.Buffer(nil, maxScannerBufferSize)
 		var param any
 
-		// Track reasoning item IDs seen in response.output_item.added events.
-		// Copilot sometimes returns mismatched IDs between added/done for reasoning
-		// items, which crashes the ai-sdk (activeReasoningPart.summaryParts undefined).
-		// Key: output_index, Value: item.id from the "added" event.
+		// Track item IDs seen in SSE events to fix Copilot's mismatched IDs.
+		// Copilot sometimes returns different encrypted IDs for the same item
+		// across added/done/delta events.  The ai-sdk uses these IDs as map
+		// keys, so mismatches crash the client.
+		//
+		// responsesReasoningIDs: output_index → item.id from output_item.added (reasoning)
+		// responsesContentPartIDs: "output_index:content_index" → item_id from content_part.added
 		responsesReasoningIDs := map[int]string{}
+		responsesContentPartIDs := map[string]string{}
 
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -471,7 +475,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			// reasoning items. The ai-sdk uses item.id as a map key — mismatched IDs crash
 			// the client with "TypeError: activeReasoningPart.summaryParts".
 			if useResponses && from == to {
-				patched := fixResponsesReasoningIDs(line, responsesReasoningIDs)
+				patched := fixResponsesItemIDs(line, responsesReasoningIDs, responsesContentPartIDs)
 				cloned := make([]byte, len(patched)+1)
 				copy(cloned, patched)
 				cloned[len(patched)] = '\n'
@@ -1728,18 +1732,28 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 	return models
 }
 
-// fixResponsesReasoningIDs patches SSE data lines in the openai-response ->
-// openai-response pass-through path to ensure reasoning item IDs are
-// consistent between output_item.added and output_item.done events.
+// fixResponsesItemIDs patches SSE data lines in the openai-response ->
+// openai-response pass-through path to ensure item IDs are consistent
+// across added, delta, done, and completed events.
 //
-// Copilot sometimes returns different item.id values for the same reasoning
-// output item in its "added" vs "done" (and "completed") events. The ai-sdk
-// uses item.id as a map key: it stores state on "added" and looks it up on
-// "done". Mismatched IDs cause a TypeError crash in the client.
+// Copilot sometimes returns different encrypted item IDs for the same
+// logical item in different SSE events.  The ai-sdk (@ai-sdk/openai
+// Responses provider) uses these IDs as map keys, so mismatches crash
+// the client.
 //
-// reasoningIDs maps output_index → item.id from the "added" event.
-// Non-data lines and non-reasoning events are returned unchanged.
-func fixResponsesReasoningIDs(line []byte, reasoningIDs map[int]string) []byte {
+// Two categories are handled:
+//
+//  1. Reasoning items: item.id may differ between output_item.added and
+//     output_item.done (and response.completed).  reasoningIDs tracks
+//     output_index → item.id from the "added" event.
+//
+//  2. Content parts: item_id may differ between content_part.added and
+//     output_text.delta / output_text.done / content_part.done.
+//     contentPartIDs tracks "output_index:content_index" → item_id from
+//     the content_part.added event.
+//
+// Non-data lines and unrelated events are returned unchanged.
+func fixResponsesItemIDs(line []byte, reasoningIDs map[int]string, contentPartIDs map[string]string) []byte {
 	if !bytes.HasPrefix(line, dataTag) {
 		return line
 	}
@@ -1778,11 +1792,37 @@ func fixResponsesReasoningIDs(line []byte, reasoningIDs map[int]string) []byte {
 		if err != nil {
 			return line
 		}
-		result := make([]byte, 0, 5+len(fixed))
-		result = append(result, "data:"...)
-		result = append(result, ' ')
-		result = append(result, fixed...)
-		return result
+		return buildDataLine(fixed)
+
+	case "response.content_part.added":
+		// Record the canonical item_id for this content part.
+		outIdx := gjson.GetBytes(data, "output_index").String()
+		cntIdx := gjson.GetBytes(data, "content_index").String()
+		itemID := gjson.GetBytes(data, "item_id").String()
+		if itemID != "" {
+			contentPartIDs[outIdx+":"+cntIdx] = itemID
+		}
+		return line
+
+	case "response.output_text.delta",
+		"response.output_text.done",
+		"response.content_part.done":
+		outIdx := gjson.GetBytes(data, "output_index").String()
+		cntIdx := gjson.GetBytes(data, "content_index").String()
+		key := outIdx + ":" + cntIdx
+		addedItemID, ok := contentPartIDs[key]
+		if !ok {
+			return line
+		}
+		currentItemID := gjson.GetBytes(data, "item_id").String()
+		if currentItemID == addedItemID {
+			return line
+		}
+		fixed, err := sjson.SetBytes(data, "item_id", addedItemID)
+		if err != nil {
+			return line
+		}
+		return buildDataLine(fixed)
 
 	case "response.completed":
 		output := gjson.GetBytes(data, "response.output")
@@ -1813,13 +1853,17 @@ func fixResponsesReasoningIDs(line []byte, reasoningIDs map[int]string) []byte {
 		if !modified {
 			return line
 		}
-		result := make([]byte, 0, 5+len(fixed))
-		result = append(result, "data:"...)
-		result = append(result, ' ')
-		result = append(result, fixed...)
-		return result
+		return buildDataLine(fixed)
 
 	default:
 		return line
 	}
+}
+
+// buildDataLine constructs an SSE data line from JSON payload bytes.
+func buildDataLine(jsonData []byte) []byte {
+	result := make([]byte, 0, 6+len(jsonData))
+	result = append(result, "data: "...)
+	result = append(result, jsonData...)
+	return result
 }
