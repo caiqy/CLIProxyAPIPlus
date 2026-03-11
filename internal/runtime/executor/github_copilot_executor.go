@@ -50,9 +50,10 @@ const (
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
 type GitHubCopilotExecutor struct {
-	cfg   *config.Config
-	mu    sync.RWMutex
-	cache map[string]*cachedAPIToken
+	cfg             *config.Config
+	mu              sync.RWMutex
+	cache           map[string]*cachedAPIToken
+	initiatorBypass *initiatorBypassManager
 }
 
 // cachedAPIToken stores a cached Copilot API token with its expiry.
@@ -64,9 +65,22 @@ type cachedAPIToken struct {
 
 // NewGitHubCopilotExecutor constructs a new executor instance.
 func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
+	var bypass *initiatorBypassManager
+	if cfg != nil && cfg.GitHubCopilot.ForceAgentInitiatorBypass.Enabled {
+		window := strings.TrimSpace(cfg.GitHubCopilot.ForceAgentInitiatorBypass.Window)
+		stateFile := strings.TrimSpace(cfg.GitHubCopilot.ForceAgentInitiatorBypass.StateFile)
+		if window == "" || stateFile == "" {
+			log.Warn("github-copilot executor: force-agent-initiator-bypass enabled but window/state-file is empty; bypass disabled")
+		} else if d, err := time.ParseDuration(window); err != nil || d <= 0 {
+			log.Warnf("github-copilot executor: invalid force-agent-initiator-bypass window %q; bypass disabled", window)
+		} else {
+			bypass = newInitiatorBypassManager(d, stateFile, nil)
+		}
+	}
 	return &GitHubCopilotExecutor{
-		cfg:   cfg,
-		cache: make(map[string]*cachedAPIToken),
+		cfg:             cfg,
+		cache:           make(map[string]*cachedAPIToken),
+		initiatorBypass: bypass,
 	}
 }
 
@@ -198,8 +212,11 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 
 	// Inject a fake assistant message when force-agent-initiator is enabled and
 	// the request body has no agent role (would otherwise produce X-Initiator: user).
-	if e.cfg.GitHubCopilot.ForceAgentInitiator && !containsAgentConversationRole(body) {
-		body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useResponses)
+	hasAgentRole := containsAgentConversationRole(body)
+	if e.cfg.GitHubCopilot.ForceAgentInitiator && !hasAgentRole {
+		if e.initiatorBypass == nil || !e.initiatorBypass.ShouldBypass(req.Model, apiToken, false) {
+			body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useResponses)
+		}
 	}
 
 	path := selectGitHubCopilotEndpoint(from, req.Model)
@@ -348,8 +365,11 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 	// Inject a fake assistant message when force-agent-initiator is enabled and
 	// the request body has no agent role (would otherwise produce X-Initiator: user).
-	if e.cfg.GitHubCopilot.ForceAgentInitiator && !containsAgentConversationRole(body) {
-		body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useResponses)
+	hasAgentRole := containsAgentConversationRole(body)
+	if e.cfg.GitHubCopilot.ForceAgentInitiator && !hasAgentRole {
+		if e.initiatorBypass == nil || !e.initiatorBypass.ShouldBypass(req.Model, apiToken, false) {
+			body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useResponses)
+		}
 	}
 
 	path := selectGitHubCopilotEndpoint(from, req.Model)

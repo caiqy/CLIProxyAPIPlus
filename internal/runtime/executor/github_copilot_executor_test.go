@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1769,5 +1770,184 @@ func TestExecuteStream_ForceAgentInitiator_InjectsAssistant(t *testing.T) {
 	}
 	if capturedInitiator != "agent" {
 		t.Fatalf("X-Initiator = %q, want agent", capturedInitiator)
+	}
+}
+
+func TestExecute_ForceAgentInitiatorBypass_OncePerWindow(t *testing.T) {
+	t.Parallel()
+
+	var capturedInitiators []string
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		capturedInitiators = append(capturedInitiators, r.Header.Get("X-Initiator"))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+		}, nil
+	}))
+
+	stateFile := filepath.Join(t.TempDir(), "copilot-bypass-state.json")
+	cfg := &config.Config{}
+	cfg.GitHubCopilot.ForceAgentInitiator = true
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.Enabled = true
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.Window = "1h"
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.StateFile = stateFile
+	cfg.SDKConfig.UpstreamTimeouts.ConnectTimeoutSeconds = 97
+	cfg.SDKConfig.UpstreamTimeouts.ResponseHeaderTimeoutSeconds = 98
+
+	e := NewGitHubCopilotExecutor(cfg)
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
+
+	for i := 0; i < 2; i++ {
+		_, err := e.Execute(ctx, auth, cliproxyexecutor.Request{
+			Model:   "gpt-4o",
+			Payload: bytes.Clone(payload),
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FromString("openai"),
+			OriginalRequest: bytes.Clone(payload),
+		})
+		if err != nil {
+			t.Fatalf("Execute #%d failed: %v", i+1, err)
+		}
+	}
+
+	if len(capturedInitiators) != 2 {
+		t.Fatalf("want 2 requests, got %d", len(capturedInitiators))
+	}
+	if capturedInitiators[0] != "user" {
+		t.Fatalf("first X-Initiator = %q, want user", capturedInitiators[0])
+	}
+	if capturedInitiators[1] != "agent" {
+		t.Fatalf("second X-Initiator = %q, want agent", capturedInitiators[1])
+	}
+}
+
+func TestExecuteStream_ForceAgentInitiatorBypass_OncePerWindow(t *testing.T) {
+	t.Parallel()
+
+	var capturedInitiators []string
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		capturedInitiators = append(capturedInitiators, r.Header.Get("X-Initiator"))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		}, nil
+	}))
+
+	stateFile := filepath.Join(t.TempDir(), "copilot-bypass-stream-state.json")
+	cfg := &config.Config{}
+	cfg.GitHubCopilot.ForceAgentInitiator = true
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.Enabled = true
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.Window = "1h"
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.StateFile = stateFile
+	cfg.SDKConfig.UpstreamTimeouts.ConnectTimeoutSeconds = 99
+	cfg.SDKConfig.UpstreamTimeouts.ResponseHeaderTimeoutSeconds = 100
+
+	e := NewGitHubCopilotExecutor(cfg)
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
+
+	for i := 0; i < 2; i++ {
+		stream, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+			Model:   "gpt-4o",
+			Payload: bytes.Clone(payload),
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FromString("openai"),
+			OriginalRequest: bytes.Clone(payload),
+		})
+		if err != nil {
+			t.Fatalf("ExecuteStream #%d failed: %v", i+1, err)
+		}
+		if stream != nil {
+			for range stream.Chunks {
+			}
+		}
+	}
+
+	if len(capturedInitiators) != 2 {
+		t.Fatalf("want 2 requests, got %d", len(capturedInitiators))
+	}
+	if capturedInitiators[0] != "user" {
+		t.Fatalf("first X-Initiator = %q, want user", capturedInitiators[0])
+	}
+	if capturedInitiators[1] != "agent" {
+		t.Fatalf("second X-Initiator = %q, want agent", capturedInitiators[1])
+	}
+}
+
+func TestExecute_ForceAgentInitiatorBypass_AgentDoesNotConsume(t *testing.T) {
+	t.Parallel()
+
+	var capturedInitiators []string
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		capturedInitiators = append(capturedInitiators, r.Header.Get("X-Initiator"))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+		}, nil
+	}))
+
+	stateFile := filepath.Join(t.TempDir(), "copilot-bypass-agent-state.json")
+	cfg := &config.Config{}
+	cfg.GitHubCopilot.ForceAgentInitiator = true
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.Enabled = true
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.Window = "1h"
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.StateFile = stateFile
+	cfg.SDKConfig.UpstreamTimeouts.ConnectTimeoutSeconds = 101
+	cfg.SDKConfig.UpstreamTimeouts.ResponseHeaderTimeoutSeconds = 102
+
+	e := NewGitHubCopilotExecutor(cfg)
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+
+	payloadAgent := []byte(`{"model":"gpt-4o","messages":[{"role":"assistant","content":"prior"},{"role":"user","content":"hello"}]}`)
+	_, err := e.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: bytes.Clone(payloadAgent),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: bytes.Clone(payloadAgent),
+	})
+	if err != nil {
+		t.Fatalf("Execute agent payload failed: %v", err)
+	}
+
+	payloadUserOnly := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"second"}]}`)
+	_, err = e.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: bytes.Clone(payloadUserOnly),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: bytes.Clone(payloadUserOnly),
+	})
+	if err != nil {
+		t.Fatalf("Execute user-only payload failed: %v", err)
+	}
+
+	if len(capturedInitiators) != 2 {
+		t.Fatalf("want 2 requests, got %d", len(capturedInitiators))
+	}
+	if capturedInitiators[0] != "agent" {
+		t.Fatalf("first X-Initiator = %q, want agent", capturedInitiators[0])
+	}
+	if capturedInitiators[1] != "user" {
+		t.Fatalf("second X-Initiator = %q, want user (agent request should not consume bypass)", capturedInitiators[1])
 	}
 }
