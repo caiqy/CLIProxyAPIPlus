@@ -1048,6 +1048,138 @@ func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_FixesMismat
 	}
 }
 
+func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_FixesMismatchedReasoningSummaryPartIDs(t *testing.T) {
+	// Copilot sometimes returns different item_id values for reasoning summary
+	// part events (reasoning_summary_part.added/done, reasoning_summary_text.*)
+	// compared to the parent reasoning output item's id. Some clients key
+	// reasoning parts by "item_id:summary_index" and will crash if item_id
+	// changes across events.
+	//
+	// The proxy should normalise reasoning summary item_id to the parent
+	// reasoning output item id (as seen in response.output_item.added).
+	parentAddedID := "parent_reasoning_added_id"
+	partAddedItemID := "DIFFERENT_reasoning_summary_part_added_item_id"
+	deltaItemID := "DIFFERENT_reasoning_summary_delta_item_id"
+	doneTextItemID := "DIFFERENT_reasoning_summary_text_done_item_id"
+	partDoneItemID := "DIFFERENT_reasoning_summary_part_done_item_id"
+	parentDoneID := "DIFFERENT_parent_reasoning_done_id"
+
+	upstream := strings.Join([]string{
+		"event: response.created",
+		"",
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4","output":[]}}`,
+		"",
+		"event: response.output_item.added",
+		"",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"` + parentAddedID + `","summary":[]}}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		"",
+		`data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0,"item_id":"` + partAddedItemID + `","part":{"type":"summary_text","text":""}}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"item_id":"` + deltaItemID + `","delta":"hi"}`,
+		"",
+		"event: response.reasoning_summary_text.done",
+		"",
+		`data: {"type":"response.reasoning_summary_text.done","output_index":0,"summary_index":0,"item_id":"` + doneTextItemID + `","text":"hi"}`,
+		"",
+		"event: response.reasoning_summary_part.done",
+		"",
+		`data: {"type":"response.reasoning_summary_part.done","output_index":0,"summary_index":0,"item_id":"` + partDoneItemID + `","part":{"type":"summary_text","text":"hi"}}`,
+		"",
+		"event: response.output_item.done",
+		"",
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"` + parentDoneID + `","summary":[{"type":"summary_text","text":"hi"}]}}`,
+		"",
+		"event: response.completed",
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"reasoning","id":"` + parentDoneID + `","summary":[{"type":"summary_text","text":"hi"}]}]}}`,
+		"",
+	}, "\n")
+
+	// Expected: all reasoning summary events use parentAddedID as item_id,
+	// and output_item.done + response.completed use parentAddedID as id.
+	want := strings.Join([]string{
+		"event: response.created",
+		"",
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4","output":[]}}`,
+		"",
+		"event: response.output_item.added",
+		"",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"` + parentAddedID + `","summary":[]}}`,
+		"",
+		"event: response.reasoning_summary_part.added",
+		"",
+		`data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0,"item_id":"` + parentAddedID + `","part":{"type":"summary_text","text":""}}`,
+		"",
+		"event: response.reasoning_summary_text.delta",
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"item_id":"` + parentAddedID + `","delta":"hi"}`,
+		"",
+		"event: response.reasoning_summary_text.done",
+		"",
+		`data: {"type":"response.reasoning_summary_text.done","output_index":0,"summary_index":0,"item_id":"` + parentAddedID + `","text":"hi"}`,
+		"",
+		"event: response.reasoning_summary_part.done",
+		"",
+		`data: {"type":"response.reasoning_summary_part.done","output_index":0,"summary_index":0,"item_id":"` + parentAddedID + `","part":{"type":"summary_text","text":"hi"}}`,
+		"",
+		"event: response.output_item.done",
+		"",
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"` + parentAddedID + `","summary":[{"type":"summary_text","text":"hi"}]}}`,
+		"",
+		"event: response.completed",
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"reasoning","id":"` + parentAddedID + `","summary":[{"type":"summary_text","text":"hi"}]}]}}`,
+		"",
+	}, "\n")
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstream)),
+		}, nil
+	}))
+
+	e := NewGitHubCopilotExecutor(&config.Config{SDKConfig: config.SDKConfig{UpstreamTimeouts: config.UpstreamTimeouts{
+		ConnectTimeoutSeconds:        17,
+		ResponseHeaderTimeoutSeconds: 47,
+	}}})
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+
+	stream, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var got bytes.Buffer
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+
+	if got.String() != want {
+		t.Fatalf("reasoning summary item_id fixup mismatch\n--- got ---\n%s\n--- want ---\n%s", got.String(), want)
+	}
+}
+
 func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_FixesMismatchedTextPartIDs(t *testing.T) {
 	// Copilot returns different item_id values for content_part.added vs
 	// output_text.delta (and done) events for the same text content part.

@@ -428,8 +428,10 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		//
 		// responsesOutputItemIDs: output_index → item.id from response.output_item.added
 		// responsesContentPartIDs: "output_index:content_index" → canonical item_id for that content part
+		// responsesReasoningSummaryPartIDs: "output_index:summary_index" → canonical item_id for that summary part
 		responsesOutputItemIDs := map[int]string{}
 		responsesContentPartIDs := map[string]string{}
+		responsesReasoningSummaryPartIDs := map[string]string{}
 
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -475,7 +477,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			// reasoning items. The ai-sdk uses item.id as a map key — mismatched IDs crash
 			// the client with "TypeError: activeReasoningPart.summaryParts".
 			if useResponses && from == to {
-				patched := fixResponsesItemIDs(line, responsesOutputItemIDs, responsesContentPartIDs)
+				patched := fixResponsesItemIDs(line, responsesOutputItemIDs, responsesContentPartIDs, responsesReasoningSummaryPartIDs)
 				cloned := make([]byte, len(patched)+1)
 				copy(cloned, patched)
 				cloned[len(patched)] = '\n'
@@ -1749,7 +1751,7 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 //     to match.
 //
 // Non-data lines and unrelated events are returned unchanged.
-func fixResponsesItemIDs(line []byte, outputItemIDs map[int]string, contentPartIDs map[string]string) []byte {
+func fixResponsesItemIDs(line []byte, outputItemIDs map[int]string, contentPartIDs map[string]string, reasoningSummaryPartIDs map[string]string) []byte {
 	if !bytes.HasPrefix(line, dataTag) {
 		return line
 	}
@@ -1808,6 +1810,61 @@ func fixResponsesItemIDs(line []byte, outputItemIDs map[int]string, contentPartI
 			return line
 		}
 		fixed, err := sjson.SetBytes(data, "item_id", canonicalItemID)
+		if err != nil {
+			return line
+		}
+		return buildDataLine(fixed)
+
+	case "response.reasoning_summary_part.added":
+		// Record the canonical item_id for this reasoning summary part.
+		outIdxInt := int(gjson.GetBytes(data, "output_index").Int())
+		outIdx := gjson.GetBytes(data, "output_index").String()
+		sumIdx := gjson.GetBytes(data, "summary_index").String()
+		key := outIdx + ":" + sumIdx
+		currentItemID := gjson.GetBytes(data, "item_id").String()
+		if currentItemID == "" {
+			return line
+		}
+		canonicalItemID := currentItemID
+		if parentID, ok := outputItemIDs[outIdxInt]; ok && parentID != "" {
+			canonicalItemID = parentID
+		}
+		if canonicalItemID != "" {
+			reasoningSummaryPartIDs[key] = canonicalItemID
+		}
+		if currentItemID == canonicalItemID {
+			return line
+		}
+		fixed, err := sjson.SetBytes(data, "item_id", canonicalItemID)
+		if err != nil {
+			return line
+		}
+		return buildDataLine(fixed)
+
+	case "response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_summary_part.done":
+		outIdx := gjson.GetBytes(data, "output_index").String()
+		sumIdx := gjson.GetBytes(data, "summary_index").String()
+		key := outIdx + ":" + sumIdx
+		addedItemID, ok := reasoningSummaryPartIDs[key]
+		if !ok {
+			// Fallback: if we know the parent output item id, normalise to it.
+			outIdxInt := int(gjson.GetBytes(data, "output_index").Int())
+			if parentID, ok2 := outputItemIDs[outIdxInt]; ok2 && parentID != "" {
+				addedItemID = parentID
+				reasoningSummaryPartIDs[key] = parentID
+				ok = true
+			}
+		}
+		if !ok || addedItemID == "" {
+			return line
+		}
+		currentItemID := gjson.GetBytes(data, "item_id").String()
+		if currentItemID == "" || currentItemID == addedItemID {
+			return line
+		}
+		fixed, err := sjson.SetBytes(data, "item_id", addedItemID)
 		if err != nil {
 			return line
 		}
