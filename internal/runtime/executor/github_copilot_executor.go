@@ -455,6 +455,18 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				continue
 			}
 
+			// When we are using the Copilot OpenAI /responses endpoint and the downstream
+			// client is also OpenAI Responses (openai-response -> openai-response), forward
+			// SSE lines directly. The translator layer is line-based and will otherwise
+			// drop SSE framing (event lines + blank delimiters), breaking clients.
+			if useResponses && from == to {
+				cloned := make([]byte, len(line)+1)
+				copy(cloned, line)
+				cloned[len(line)] = '\n'
+				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
+				continue
+			}
+
 			var chunks []string
 			if useResponses && from.String() == "claude" {
 				chunks = translateGitHubCopilotResponsesStreamToClaude(bytes.Clone(line), &param)

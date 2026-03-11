@@ -3,13 +3,21 @@ package executor
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
+
+type fixedRoundTripper struct{}
+
+func (*fixedRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusTeapot, Body: io.NopCloser(strings.NewReader(""))}, nil
+}
 
 func TestIsTimeoutError_Nil(t *testing.T) {
 	timeoutType, isTimeout := IsTimeoutError(nil)
@@ -344,5 +352,25 @@ func TestNewProxyAwareHTTPClient_CacheKeyIncludesTLSInsecureSwitch(t *testing.T)
 	}
 	if transportStrict.TLSClientConfig == nil || transportStrict.TLSClientConfig.InsecureSkipVerify {
 		t.Fatalf("expected strict transport, got %#v", transportStrict.TLSClientConfig)
+	}
+}
+
+func TestNewProxyAwareHTTPClient_ContextRoundTripperOverridesCache(t *testing.T) {
+	// When a custom RoundTripper is provided via context (used by tests and some integrations),
+	// newProxyAwareHTTPClient must NOT return a previously cached client with a different
+	// transport.
+	httpClientCacheMutex.Lock()
+	httpClientCache = make(map[string]*http.Client)
+	httpClientCacheMutex.Unlock()
+
+	cfg := &config.Config{}
+	// First call populates cache with default transport.
+	_ = newProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
+
+	customRT := &fixedRoundTripper{}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(customRT))
+	client := newProxyAwareHTTPClient(ctx, cfg, nil, 0)
+	if client.Transport != customRT {
+		t.Fatalf("client.Transport = %T, want context RoundTripper %T", client.Transport, customRT)
 	}
 }

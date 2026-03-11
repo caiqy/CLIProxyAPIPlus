@@ -837,6 +837,74 @@ func TestGitHubCopilotMessagesStream_ClaudeToClaude_AppendsNewlinePerLine(t *tes
 	}
 }
 
+func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_ForwardsSSEVerbatim(t *testing.T) {
+	// Copilot /responses uses SSE with explicit event lines. When the downstream client
+	// is also using OpenAI Responses format (openai-response -> openai-response), the
+	// executor should forward SSE verbatim (preserving event lines + blank delimiters)
+	// instead of re-translating per-line.
+	upstream := strings.Join([]string{
+		"event: response.created",
+		"",
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.4\"}}",
+		"",
+		"event: response.output_item.added",
+		"",
+		"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"r1\",\"summary\":[]}}",
+		"",
+		"event: response.output_item.done",
+		"",
+		"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"r1\",\"summary\":[]}}",
+		"",
+		"event: response.completed",
+		"",
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}",
+		"",
+	}, "\n")
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstream)),
+		}, nil
+	}))
+
+	e := NewGitHubCopilotExecutor(&config.Config{SDKConfig: config.SDKConfig{UpstreamTimeouts: config.UpstreamTimeouts{
+		ConnectTimeoutSeconds:        17,
+		ResponseHeaderTimeoutSeconds: 47,
+	}}})
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+
+	stream, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var got bytes.Buffer
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+
+	if got.String() != upstream {
+		t.Fatalf("forwarded SSE mismatch\n--- got ---\n%s\n--- want ---\n%s", got.String(), upstream)
+	}
+}
+
 func TestGitHubCopilotExecute_BetasExtractedFromBodyIntoHeader(t *testing.T) {
 	t.Parallel()
 

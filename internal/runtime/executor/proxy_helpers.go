@@ -59,6 +59,20 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
+	// Priority 3 (context transport): When no proxy is configured and a custom RoundTripper
+	// is provided via context, it must take effect per-call. Do NOT return a cached client
+	// with a different transport, and do NOT cache this client (the RoundTripper may differ
+	// across requests/tests).
+	if proxyURL == "" && ctx != nil {
+		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+			httpClient := &http.Client{Transport: rt}
+			if timeout > 0 {
+				httpClient.Timeout = timeout
+			}
+			return httpClient
+		}
+	}
+
 	// Get upstream timeout configuration
 	var sdkCfg *config.SDKConfig
 	if cfg != nil {
