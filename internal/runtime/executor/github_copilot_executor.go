@@ -422,13 +422,13 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		var param any
 
 		// Track item IDs seen in SSE events to fix Copilot's mismatched IDs.
-		// Copilot sometimes returns different encrypted IDs for the same item
-		// across added/done/delta events.  The ai-sdk uses these IDs as map
-		// keys, so mismatches crash the client.
+		// Copilot sometimes returns different encrypted IDs for the same logical
+		// item across added/done/delta events. Some downstream SDKs use these IDs
+		// as map keys, so mismatches crash the client.
 		//
-		// responsesReasoningIDs: output_index → item.id from output_item.added (reasoning)
-		// responsesContentPartIDs: "output_index:content_index" → item_id from content_part.added
-		responsesReasoningIDs := map[int]string{}
+		// responsesOutputItemIDs: output_index → item.id from response.output_item.added
+		// responsesContentPartIDs: "output_index:content_index" → canonical item_id for that content part
+		responsesOutputItemIDs := map[int]string{}
 		responsesContentPartIDs := map[string]string{}
 
 		for scanner.Scan() {
@@ -475,7 +475,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			// reasoning items. The ai-sdk uses item.id as a map key — mismatched IDs crash
 			// the client with "TypeError: activeReasoningPart.summaryParts".
 			if useResponses && from == to {
-				patched := fixResponsesItemIDs(line, responsesReasoningIDs, responsesContentPartIDs)
+				patched := fixResponsesItemIDs(line, responsesOutputItemIDs, responsesContentPartIDs)
 				cloned := make([]byte, len(patched)+1)
 				copy(cloned, patched)
 				cloned[len(patched)] = '\n'
@@ -1733,27 +1733,23 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 }
 
 // fixResponsesItemIDs patches SSE data lines in the openai-response ->
-// openai-response pass-through path to ensure item IDs are consistent
-// across added, delta, done, and completed events.
+// openai-response pass-through path to ensure IDs are consistent.
 //
-// Copilot sometimes returns different encrypted item IDs for the same
-// logical item in different SSE events.  The ai-sdk (@ai-sdk/openai
-// Responses provider) uses these IDs as map keys, so mismatches crash
-// the client.
+// Copilot sometimes returns different encrypted IDs for the same logical
+// output item / content part across events. Some downstream SDKs use these
+// IDs as map keys, so mismatches crash the client.
 //
-// Two categories are handled:
-//
-//  1. Reasoning items: item.id may differ between output_item.added and
-//     output_item.done (and response.completed).  reasoningIDs tracks
-//     output_index → item.id from the "added" event.
-//
-//  2. Content parts: item_id may differ between content_part.added and
-//     output_text.delta / output_text.done / content_part.done.
-//     contentPartIDs tracks "output_index:content_index" → item_id from
-//     the content_part.added event.
+// Handled cases:
+//  1. output items: item.id may differ between response.output_item.added,
+//     response.output_item.done, and response.completed.
+//  2. content parts: item_id may differ between response.content_part.added
+//     and response.output_text.{delta,done} / response.content_part.done.
+//     Additionally, Copilot may set content-part item_id to a different
+//     value than the parent output item's id; clients often expect these
+//     to match.
 //
 // Non-data lines and unrelated events are returned unchanged.
-func fixResponsesItemIDs(line []byte, reasoningIDs map[int]string, contentPartIDs map[string]string) []byte {
+func fixResponsesItemIDs(line []byte, outputItemIDs map[int]string, contentPartIDs map[string]string) []byte {
 	if !bytes.HasPrefix(line, dataTag) {
 		return line
 	}
@@ -1765,21 +1761,16 @@ func fixResponsesItemIDs(line []byte, reasoningIDs map[int]string, contentPartID
 	eventType := gjson.GetBytes(data, "type").String()
 	switch eventType {
 	case "response.output_item.added":
-		if gjson.GetBytes(data, "item.type").String() == "reasoning" {
-			idx := int(gjson.GetBytes(data, "output_index").Int())
-			id := gjson.GetBytes(data, "item.id").String()
-			if id != "" {
-				reasoningIDs[idx] = id
-			}
+		idx := int(gjson.GetBytes(data, "output_index").Int())
+		id := gjson.GetBytes(data, "item.id").String()
+		if id != "" {
+			outputItemIDs[idx] = id
 		}
 		return line
 
 	case "response.output_item.done":
-		if gjson.GetBytes(data, "item.type").String() != "reasoning" {
-			return line
-		}
 		idx := int(gjson.GetBytes(data, "output_index").Int())
-		addedID, ok := reasoningIDs[idx]
+		addedID, ok := outputItemIDs[idx]
 		if !ok {
 			return line
 		}
@@ -1796,13 +1787,31 @@ func fixResponsesItemIDs(line []byte, reasoningIDs map[int]string, contentPartID
 
 	case "response.content_part.added":
 		// Record the canonical item_id for this content part.
+		// Prefer the parent output item's ID when present (OpenAI semantics).
+		outIdxInt := int(gjson.GetBytes(data, "output_index").Int())
 		outIdx := gjson.GetBytes(data, "output_index").String()
 		cntIdx := gjson.GetBytes(data, "content_index").String()
-		itemID := gjson.GetBytes(data, "item_id").String()
-		if itemID != "" {
-			contentPartIDs[outIdx+":"+cntIdx] = itemID
+		key := outIdx + ":" + cntIdx
+
+		currentItemID := gjson.GetBytes(data, "item_id").String()
+		if currentItemID == "" {
+			return line
 		}
-		return line
+		canonicalItemID := currentItemID
+		if parentID, ok := outputItemIDs[outIdxInt]; ok && parentID != "" {
+			canonicalItemID = parentID
+		}
+		if canonicalItemID != "" {
+			contentPartIDs[key] = canonicalItemID
+		}
+		if currentItemID == canonicalItemID {
+			return line
+		}
+		fixed, err := sjson.SetBytes(data, "item_id", canonicalItemID)
+		if err != nil {
+			return line
+		}
+		return buildDataLine(fixed)
 
 	case "response.output_text.delta",
 		"response.output_text.done",
@@ -1815,6 +1824,9 @@ func fixResponsesItemIDs(line []byte, reasoningIDs map[int]string, contentPartID
 			return line
 		}
 		currentItemID := gjson.GetBytes(data, "item_id").String()
+		if currentItemID == "" {
+			return line
+		}
 		if currentItemID == addedItemID {
 			return line
 		}
@@ -1832,14 +1844,10 @@ func fixResponsesItemIDs(line []byte, reasoningIDs map[int]string, contentPartID
 		modified := false
 		fixed := data
 		for i, item := range output.Array() {
-			if item.Get("type").String() != "reasoning" {
-				continue
-			}
 			currentID := item.Get("id").String()
-			// Find the matching added ID. The position in the output array
-			// corresponds to the output_index used during streaming.
-			addedID, ok := reasoningIDs[i]
-			if !ok || currentID == addedID {
+			// The position in the output array corresponds to output_index.
+			addedID, ok := outputItemIDs[i]
+			if !ok || addedID == "" || currentID == addedID {
 				continue
 			}
 			path := fmt.Sprintf("response.output.%d.id", i)

@@ -1056,8 +1056,9 @@ func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_FixesMismat
 	// text part on content_part.added using its item_id, then looks it up by
 	// item_id in output_text.delta.  Mismatched IDs cause:
 	//   "text part <id> not found"
-	// The proxy must normalise the IDs so delta/done events use the same
-	// item_id that was seen in content_part.added.
+	// The proxy must normalise the IDs so all content-part events use a
+	// stable item_id. In OpenAI semantics this should match the parent
+	// output item's id.
 	contentPartAddedItemID := "K_UlBuLO_content_part_added_item_id"
 	deltaItemID1 := "c4Nz2lFt_delta_item_id_first"
 	deltaItemID2 := "K8MR66lL_delta_item_id_second"
@@ -1103,8 +1104,8 @@ func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_FixesMismat
 		"",
 	}, "\n")
 
-	// Expected: the proxy normalises all item_id fields in delta/done events
-	// to the item_id seen in content_part.added.
+	// Expected: the proxy normalises all item_id fields in content-part events
+	// to the parent message output-item id.
 	want := strings.Join([]string{
 		"event: response.created",
 		"",
@@ -1116,31 +1117,31 @@ func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_FixesMismat
 		"",
 		"event: response.content_part.added",
 		"",
-		`data: {"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","part":{"type":"output_text","text":""}}`,
+		`data: {"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"msg-added","part":{"type":"output_text","text":""}}`,
 		"",
 		"event: response.output_text.delta",
 		"",
-		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","delta":"hello"}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg-added","delta":"hello"}`,
 		"",
 		"event: response.output_text.delta",
 		"",
-		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","delta":" world"}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg-added","delta":" world"}`,
 		"",
 		"event: response.output_text.done",
 		"",
-		`data: {"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","text":"hello world"}`,
+		`data: {"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"msg-added","text":"hello world"}`,
 		"",
 		"event: response.content_part.done",
 		"",
-		`data: {"type":"response.content_part.done","output_index":0,"content_index":0,"item_id":"` + contentPartAddedItemID + `","part":{"type":"output_text","text":"hello world"}}`,
+		`data: {"type":"response.content_part.done","output_index":0,"content_index":0,"item_id":"msg-added","part":{"type":"output_text","text":"hello world"}}`,
 		"",
 		"event: response.output_item.done",
 		"",
-		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-done","role":"assistant","content":[{"type":"output_text","text":"hello world"}]}}`,
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-added","role":"assistant","content":[{"type":"output_text","text":"hello world"}]}}`,
 		"",
 		"event: response.completed",
 		"",
-		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg-done","role":"assistant","content":[{"type":"output_text","text":"hello world"}]}]}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg-added","role":"assistant","content":[{"type":"output_text","text":"hello world"}]}]}}`,
 		"",
 	}, "\n")
 
