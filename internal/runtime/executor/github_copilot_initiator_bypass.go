@@ -55,11 +55,11 @@ func newInitiatorBypassManager(window time.Duration, stateFile string, nowFn fun
 	return m
 }
 
-func (m *initiatorBypassManager) ShouldBypass(model, apiToken string, hasAgentRole bool) bool {
+func (m *initiatorBypassManager) ShouldBypass(model, bucketIdentity string, hasAgentRole bool) bool {
 	if m == nil || hasAgentRole || m.window <= 0 {
 		return false
 	}
-	key := initiatorBypassBucketKey(model, apiToken)
+	key := initiatorBypassBucketKey(model, bucketIdentity)
 	now := m.now()
 
 	m.mu.Lock()
@@ -146,7 +146,7 @@ func (m *initiatorBypassManager) persistLocked() error {
 	return nil
 }
 
-func initiatorBypassBucketKey(model, apiToken string) string {
-	h := sha256.Sum256([]byte(strings.TrimSpace(apiToken)))
+func initiatorBypassBucketKey(model, bucketIdentity string) string {
+	h := sha256.Sum256([]byte(strings.TrimSpace(bucketIdentity)))
 	return strings.TrimSpace(model) + "|" + hex.EncodeToString(h[:])
 }

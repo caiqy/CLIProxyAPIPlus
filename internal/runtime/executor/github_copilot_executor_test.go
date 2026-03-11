@@ -1951,3 +1951,73 @@ func TestExecute_ForceAgentInitiatorBypass_AgentDoesNotConsume(t *testing.T) {
 		t.Fatalf("second X-Initiator = %q, want user (agent request should not consume bypass)", capturedInitiators[1])
 	}
 }
+
+func TestExecute_ForceAgentInitiatorBypass_APITokenRotationDoesNotResetWindow(t *testing.T) {
+	t.Parallel()
+
+	var capturedInitiators []string
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(r *http.Request) (*http.Response, error) {
+		capturedInitiators = append(capturedInitiators, r.Header.Get("X-Initiator"))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)),
+		}, nil
+	}))
+
+	stateFile := filepath.Join(t.TempDir(), "copilot-bypass-rotate-token-state.json")
+	cfg := &config.Config{}
+	cfg.GitHubCopilot.ForceAgentInitiator = true
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.Enabled = true
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.Window = "1h"
+	cfg.GitHubCopilot.ForceAgentInitiatorBypass.StateFile = stateFile
+	cfg.SDKConfig.UpstreamTimeouts.ConnectTimeoutSeconds = 103
+	cfg.SDKConfig.UpstreamTimeouts.ResponseHeaderTimeoutSeconds = 104
+
+	e := NewGitHubCopilotExecutor(cfg)
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token-1",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
+
+	_, err := e.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("Execute first request failed: %v", err)
+	}
+
+	// Simulate Copilot API token refresh while keeping the same upstream account identity.
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token-2",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	_, err = e.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("Execute second request failed: %v", err)
+	}
+
+	if len(capturedInitiators) != 2 {
+		t.Fatalf("want 2 requests, got %d", len(capturedInitiators))
+	}
+	if capturedInitiators[0] != "user" {
+		t.Fatalf("first X-Initiator = %q, want user", capturedInitiators[0])
+	}
+	if capturedInitiators[1] != "agent" {
+		t.Fatalf("second X-Initiator = %q, want agent (token rotation must not reset window)", capturedInitiators[1])
+	}
+}

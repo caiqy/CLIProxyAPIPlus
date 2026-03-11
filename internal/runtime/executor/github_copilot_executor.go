@@ -214,7 +214,8 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	// the request body has no agent role (would otherwise produce X-Initiator: user).
 	hasAgentRole := containsAgentConversationRole(body)
 	if e.cfg.GitHubCopilot.ForceAgentInitiator && !hasAgentRole {
-		if e.initiatorBypass == nil || !e.initiatorBypass.ShouldBypass(req.Model, apiToken, false) {
+		bypassIdentity := e.initiatorBypassIdentity(auth, apiToken)
+		if e.initiatorBypass == nil || !e.initiatorBypass.ShouldBypass(req.Model, bypassIdentity, false) {
 			body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useResponses)
 		}
 	}
@@ -367,7 +368,8 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	// the request body has no agent role (would otherwise produce X-Initiator: user).
 	hasAgentRole := containsAgentConversationRole(body)
 	if e.cfg.GitHubCopilot.ForceAgentInitiator && !hasAgentRole {
-		if e.initiatorBypass == nil || !e.initiatorBypass.ShouldBypass(req.Model, apiToken, false) {
+		bypassIdentity := e.initiatorBypassIdentity(auth, apiToken)
+		if e.initiatorBypass == nil || !e.initiatorBypass.ShouldBypass(req.Model, bypassIdentity, false) {
 			body = injectFakeAssistantMessage(body, e.cfg.GitHubCopilot.FakeAssistantContent, useResponses)
 		}
 	}
@@ -606,6 +608,18 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 	e.mu.Unlock()
 
 	return apiToken.Token, apiEndpoint, nil
+}
+
+func (e *GitHubCopilotExecutor) initiatorBypassIdentity(auth *cliproxyauth.Auth, apiToken string) string {
+	if auth != nil {
+		if id := strings.TrimSpace(auth.ID); id != "" {
+			return "auth-id:" + id
+		}
+		if accessToken := strings.TrimSpace(metaStringValue(auth.Metadata, "access_token")); accessToken != "" {
+			return "github-access-token:" + accessToken
+		}
+	}
+	return "copilot-api-token:" + strings.TrimSpace(apiToken)
 }
 
 // applyHeaders sets the required headers for GitHub Copilot API requests.
