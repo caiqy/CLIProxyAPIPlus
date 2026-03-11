@@ -1,12 +1,17 @@
 package executor
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+var initiatorBypassRenameTestMu sync.Mutex
 
 func TestInitiatorBypass_AllowOncePerWindow(t *testing.T) {
 	t.Parallel()
@@ -122,5 +127,85 @@ func TestInitiatorBypass_SubSecondWindow_Enforced(t *testing.T) {
 	now = now.Add(500 * time.Millisecond)
 	if ok := m.ShouldBypass("gpt-4o", "copilot-token-f", false); !ok {
 		t.Fatal("request at 500ms boundary should bypass again")
+	}
+}
+
+func TestInitiatorBypass_PersistFailure_DoesNotDeleteExistingStateFile(t *testing.T) {
+	initiatorBypassRenameTestMu.Lock()
+	defer initiatorBypassRenameTestMu.Unlock()
+
+	now := time.Date(2026, 3, 11, 16, 0, 0, 0, time.UTC)
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	original := `{"version":1,"buckets":{"keep":{"next_eligible_at_unix":1730000000,"updated_at_unix":1730000000}}}`
+	if err := os.WriteFile(stateFile, []byte(original), 0o600); err != nil {
+		t.Fatalf("write original state: %v", err)
+	}
+
+	m := newInitiatorBypassManager(time.Hour, stateFile, func() time.Time { return now })
+	origRename := initiatorBypassRename
+	initiatorBypassRename = func(oldPath, newPath string) error {
+		return errors.New("injected rename failure")
+	}
+	defer func() { initiatorBypassRename = origRename }()
+
+	if ok := m.ShouldBypass("gpt-4o", "copilot-token-g", false); !ok {
+		t.Fatal("persist failure should not block bypass decision")
+	}
+	raw, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("read state file after failure: %v", err)
+	}
+	if string(raw) != original {
+		t.Fatalf("state file was modified/deleted on persist failure, got %s", raw)
+	}
+}
+
+func TestInitiatorBypass_PrunesLongExpiredBucketsOnPersist(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 11, 17, 0, 0, 0, time.UTC)
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	oldKey := initiatorBypassBucketKey("gpt-4o", "old-identity")
+	freshKey := initiatorBypassBucketKey("gpt-4o", "fresh-identity")
+
+	seed := initiatorBypassStateDisk{
+		Version: initiatorBypassStateVersion,
+		Buckets: map[string]initiatorBypassBucketState{
+			oldKey: {
+				NextEligibleAtUnixNano: now.Add(-48 * time.Hour).UnixNano(),
+				UpdatedAtUnixNano:      now.Add(-48 * time.Hour).UnixNano(),
+			},
+			freshKey: {
+				NextEligibleAtUnixNano: now.Add(10 * time.Minute).UnixNano(),
+				UpdatedAtUnixNano:      now.UnixNano(),
+			},
+		},
+	}
+	rawSeed, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := os.WriteFile(stateFile, rawSeed, 0o600); err != nil {
+		t.Fatalf("write seed state: %v", err)
+	}
+
+	m := newInitiatorBypassManager(time.Hour, stateFile, func() time.Time { return now })
+	if ok := m.ShouldBypass("gpt-4o", "new-identity", false); !ok {
+		t.Fatal("request should bypass and trigger persistence")
+	}
+
+	raw, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	var got initiatorBypassStateDisk
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal state file: %v", err)
+	}
+	if _, exists := got.Buckets[oldKey]; exists {
+		t.Fatalf("expected old bucket %q to be pruned, but it still exists", oldKey)
+	}
+	if _, exists := got.Buckets[freshKey]; !exists {
+		t.Fatalf("expected fresh bucket %q to be kept", freshKey)
 	}
 }

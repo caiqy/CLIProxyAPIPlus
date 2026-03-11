@@ -4,16 +4,24 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
 
 const initiatorBypassStateVersion = 1
+
+const initiatorBypassRetentionWindows = 24
+
+var initiatorBypassCreateTemp = os.CreateTemp
+var initiatorBypassRename = os.Rename
 
 type initiatorBypassManager struct {
 	mu        sync.Mutex
@@ -64,6 +72,7 @@ func (m *initiatorBypassManager) ShouldBypass(model, bucketIdentity string, hasA
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.pruneExpiredBucketsLocked(now)
 
 	if st, ok := m.buckets[key]; ok && now.Before(st.nextEligibleAt()) {
 		return false
@@ -80,6 +89,18 @@ func (m *initiatorBypassManager) ShouldBypass(model, bucketIdentity string, hasA
 		log.Warnf("github-copilot executor: persist initiator bypass state failed: %v", err)
 	}
 	return true
+}
+
+func (m *initiatorBypassManager) pruneExpiredBucketsLocked(now time.Time) {
+	if m == nil || len(m.buckets) == 0 || m.window <= 0 {
+		return
+	}
+	cutoff := now.Add(-m.window * initiatorBypassRetentionWindows)
+	for key, state := range m.buckets {
+		if state.nextEligibleAt().Before(cutoff) {
+			delete(m.buckets, key)
+		}
+	}
 }
 
 func (s initiatorBypassBucketState) nextEligibleAt() time.Time {
@@ -132,16 +153,51 @@ func (m *initiatorBypassManager) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp := m.stateFile + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	tmpFile, err := initiatorBypassCreateTemp(filepath.Dir(m.stateFile), filepath.Base(m.stateFile)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, m.stateFile); err != nil {
-		_ = os.Remove(m.stateFile)
-		if errRetry := os.Rename(tmp, m.stateFile); errRetry != nil {
-			_ = os.Remove(tmp)
-			return errRetry
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(raw); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := initiatorBypassRename(tmpPath, m.stateFile); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := syncDirectory(filepath.Dir(m.stateFile)); err != nil {
+		log.Debugf("github-copilot executor: sync initiator bypass state directory failed: %v", err)
+	}
+	return nil
+}
+
+func syncDirectory(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = d.Close()
+	}()
+	if err := d.Sync(); err != nil {
+		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+			return nil
 		}
+		return err
 	}
 	return nil
 }
