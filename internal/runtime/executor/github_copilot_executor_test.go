@@ -905,6 +905,149 @@ func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_ForwardsSSE
 	}
 }
 
+func TestGitHubCopilotResponsesStream_OpenAIResponseToOpenAIResponse_FixesMismatchedReasoningIDs(t *testing.T) {
+	// Copilot sometimes returns reasoning items where the item.id in
+	// response.output_item.added differs from the item.id in
+	// response.output_item.done (and in response.completed output array).
+	// The ai-sdk uses item.id as a map key: it stores reasoning state on
+	// "added" and looks it up on "done". Mismatched IDs cause a crash:
+	//   TypeError: activeReasoningPart.summaryParts
+	// The proxy must normalise the IDs so "done" + "completed" use the
+	// same ID that was seen in "added".
+	addedID := "ZkFscWKLVSloolvA6KsXSaEQ_original_added_id"
+	doneID := "T5Lp1VZ4fsJ9rZX7k0I_DIFFERENT_done_id"
+
+	upstream := strings.Join([]string{
+		"event: response.created",
+		"",
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4","output":[]}}`,
+		"",
+		"event: response.output_item.added",
+		"",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"` + addedID + `","summary":[]}}`,
+		"",
+		"event: response.output_item.done",
+		"",
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"` + doneID + `","summary":[]}}`,
+		"",
+		"event: response.output_item.added",
+		"",
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg1","role":"assistant","content":[]}}`,
+		"",
+		"event: response.content_part.added",
+		"",
+		`data: {"type":"response.content_part.added","output_index":1,"content_index":0,"part":{"type":"output_text","text":""}}`,
+		"",
+		"event: response.output_text.delta",
+		"",
+		`data: {"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"hi"}`,
+		"",
+		"event: response.output_text.done",
+		"",
+		`data: {"type":"response.output_text.done","output_index":1,"content_index":0,"text":"hi"}`,
+		"",
+		"event: response.content_part.done",
+		"",
+		`data: {"type":"response.content_part.done","output_index":1,"content_index":0,"part":{"type":"output_text","text":"hi"}}`,
+		"",
+		"event: response.output_item.done",
+		"",
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg1","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}`,
+		"",
+		"event: response.completed",
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"reasoning","id":"` + doneID + `","summary":[]},{"type":"message","id":"msg1","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}}`,
+		"",
+	}, "\n")
+
+	// Expected: the proxy replaces doneID with addedID everywhere.
+	want := strings.Join([]string{
+		"event: response.created",
+		"",
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4","output":[]}}`,
+		"",
+		"event: response.output_item.added",
+		"",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"` + addedID + `","summary":[]}}`,
+		"",
+		"event: response.output_item.done",
+		"",
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"` + addedID + `","summary":[]}}`,
+		"",
+		"event: response.output_item.added",
+		"",
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg1","role":"assistant","content":[]}}`,
+		"",
+		"event: response.content_part.added",
+		"",
+		`data: {"type":"response.content_part.added","output_index":1,"content_index":0,"part":{"type":"output_text","text":""}}`,
+		"",
+		"event: response.output_text.delta",
+		"",
+		`data: {"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"hi"}`,
+		"",
+		"event: response.output_text.done",
+		"",
+		`data: {"type":"response.output_text.done","output_index":1,"content_index":0,"text":"hi"}`,
+		"",
+		"event: response.content_part.done",
+		"",
+		`data: {"type":"response.content_part.done","output_index":1,"content_index":0,"part":{"type":"output_text","text":"hi"}}`,
+		"",
+		"event: response.output_item.done",
+		"",
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg1","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}`,
+		"",
+		"event: response.completed",
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"reasoning","id":"` + addedID + `","summary":[]},{"type":"message","id":"msg1","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}}`,
+		"",
+	}, "\n")
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstream)),
+		}, nil
+	}))
+
+	e := NewGitHubCopilotExecutor(&config.Config{SDKConfig: config.SDKConfig{UpstreamTimeouts: config.UpstreamTimeouts{
+		ConnectTimeoutSeconds:        17,
+		ResponseHeaderTimeoutSeconds: 47,
+	}}})
+	e.cache["gh-access"] = &cachedAPIToken{
+		token:       "copilot-api-token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+		expiresAt:   time.Now().Add(time.Hour),
+	}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "gh-access"}}
+	payload := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+
+	stream, err := e.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: bytes.Clone(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		OriginalRequest: bytes.Clone(payload),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var got bytes.Buffer
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+
+	if got.String() != want {
+		t.Fatalf("reasoning ID fixup mismatch\n--- got ---\n%s\n--- want ---\n%s", got.String(), want)
+	}
+}
+
 func TestGitHubCopilotExecute_BetasExtractedFromBodyIntoHeader(t *testing.T) {
 	t.Parallel()
 

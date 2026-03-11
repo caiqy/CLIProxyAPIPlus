@@ -421,6 +421,12 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		scanner.Buffer(nil, maxScannerBufferSize)
 		var param any
 
+		// Track reasoning item IDs seen in response.output_item.added events.
+		// Copilot sometimes returns mismatched IDs between added/done for reasoning
+		// items, which crashes the ai-sdk (activeReasoningPart.summaryParts undefined).
+		// Key: output_index, Value: item.id from the "added" event.
+		responsesReasoningIDs := map[int]string{}
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
@@ -459,10 +465,16 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			// client is also OpenAI Responses (openai-response -> openai-response), forward
 			// SSE lines directly. The translator layer is line-based and will otherwise
 			// drop SSE framing (event lines + blank delimiters), breaking clients.
+			//
+			// Additionally, fix mismatched reasoning item IDs: Copilot sometimes returns
+			// different item.id values between output_item.added and output_item.done for
+			// reasoning items. The ai-sdk uses item.id as a map key — mismatched IDs crash
+			// the client with "TypeError: activeReasoningPart.summaryParts".
 			if useResponses && from == to {
-				cloned := make([]byte, len(line)+1)
-				copy(cloned, line)
-				cloned[len(line)] = '\n'
+				patched := fixResponsesReasoningIDs(line, responsesReasoningIDs)
+				cloned := make([]byte, len(patched)+1)
+				copy(cloned, patched)
+				cloned[len(patched)] = '\n'
 				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
 				continue
 			}
@@ -1714,4 +1726,100 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 
 	log.Infof("github-copilot: fetched %d models from API", len(models))
 	return models
+}
+
+// fixResponsesReasoningIDs patches SSE data lines in the openai-response ->
+// openai-response pass-through path to ensure reasoning item IDs are
+// consistent between output_item.added and output_item.done events.
+//
+// Copilot sometimes returns different item.id values for the same reasoning
+// output item in its "added" vs "done" (and "completed") events. The ai-sdk
+// uses item.id as a map key: it stores state on "added" and looks it up on
+// "done". Mismatched IDs cause a TypeError crash in the client.
+//
+// reasoningIDs maps output_index → item.id from the "added" event.
+// Non-data lines and non-reasoning events are returned unchanged.
+func fixResponsesReasoningIDs(line []byte, reasoningIDs map[int]string) []byte {
+	if !bytes.HasPrefix(line, dataTag) {
+		return line
+	}
+	data := bytes.TrimSpace(line[5:])
+	if len(data) == 0 || data[0] != '{' {
+		return line
+	}
+
+	eventType := gjson.GetBytes(data, "type").String()
+	switch eventType {
+	case "response.output_item.added":
+		if gjson.GetBytes(data, "item.type").String() == "reasoning" {
+			idx := int(gjson.GetBytes(data, "output_index").Int())
+			id := gjson.GetBytes(data, "item.id").String()
+			if id != "" {
+				reasoningIDs[idx] = id
+			}
+		}
+		return line
+
+	case "response.output_item.done":
+		if gjson.GetBytes(data, "item.type").String() != "reasoning" {
+			return line
+		}
+		idx := int(gjson.GetBytes(data, "output_index").Int())
+		addedID, ok := reasoningIDs[idx]
+		if !ok {
+			return line
+		}
+		currentID := gjson.GetBytes(data, "item.id").String()
+		if currentID == addedID {
+			return line
+		}
+		// Replace the mismatched ID
+		fixed, err := sjson.SetBytes(data, "item.id", addedID)
+		if err != nil {
+			return line
+		}
+		result := make([]byte, 0, 5+len(fixed))
+		result = append(result, "data:"...)
+		result = append(result, ' ')
+		result = append(result, fixed...)
+		return result
+
+	case "response.completed":
+		output := gjson.GetBytes(data, "response.output")
+		if !output.Exists() || !output.IsArray() {
+			return line
+		}
+		modified := false
+		fixed := data
+		for i, item := range output.Array() {
+			if item.Get("type").String() != "reasoning" {
+				continue
+			}
+			currentID := item.Get("id").String()
+			// Find the matching added ID. The position in the output array
+			// corresponds to the output_index used during streaming.
+			addedID, ok := reasoningIDs[i]
+			if !ok || currentID == addedID {
+				continue
+			}
+			path := fmt.Sprintf("response.output.%d.id", i)
+			var err error
+			fixed, err = sjson.SetBytes(fixed, path, addedID)
+			if err != nil {
+				continue
+			}
+			modified = true
+		}
+		if !modified {
+			return line
+		}
+		result := make([]byte, 0, 5+len(fixed))
+		result = append(result, "data:"...)
+		result = append(result, ' ')
+		result = append(result, fixed...)
+		return result
+
+	default:
+		return line
+	}
 }
