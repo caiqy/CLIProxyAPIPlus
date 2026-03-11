@@ -294,7 +294,11 @@ func parseOpenAIResponsesUsageDetail(usageNode gjson.Result) usage.Detail {
 }
 
 func parseOpenAIResponsesUsage(data []byte) usage.Detail {
-	usageNode := gjson.ParseBytes(data).Get("usage")
+	root := gjson.ParseBytes(data)
+	usageNode := root.Get("usage")
+	if !usageNode.Exists() {
+		usageNode = root.Get("response.usage")
+	}
 	if !usageNode.Exists() {
 		return usage.Detail{}
 	}
@@ -307,6 +311,9 @@ func parseOpenAIResponsesStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
+	if !usageNode.Exists() {
+		usageNode = gjson.GetBytes(payload, "response.usage")
+	}
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
