@@ -268,6 +268,24 @@ type GitHubCopilotConfig struct {
 	// FakeAssistantContent is the text content of the injected assistant message.
 	// Defaults to "OK." if empty.
 	FakeAssistantContent string `yaml:"fake-assistant-content,omitempty" json:"fake-assistant-content,omitempty"`
+
+	// ForceAgentInitiatorBypass controls periodic bypass behavior for
+	// force-agent-initiator. When enabled, requests that would otherwise be forced
+	// to agent can bypass injection once per rolling window.
+	ForceAgentInitiatorBypass ForceAgentInitiatorBypassConfig `yaml:"force-agent-initiator-bypass" json:"force-agent-initiator-bypass"`
+}
+
+// ForceAgentInitiatorBypassConfig controls periodic bypass behavior for
+// force-agent-initiator.
+type ForceAgentInitiatorBypassConfig struct {
+	// Enabled toggles periodic bypass.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Window is the rolling time window (for example: 1h, 30m).
+	Window string `yaml:"window" json:"window"`
+
+	// StateFile is the persistent state file path.
+	StateFile string `yaml:"state-file" json:"state-file"`
 }
 
 // AmpUpstreamAPIKeyEntry maps a set of client API keys to a specific upstream API key.
