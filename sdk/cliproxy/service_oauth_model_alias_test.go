@@ -91,7 +91,7 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 	}
 }
 
-func TestApplyOAuthModelAlias_DefaultGitHubCopilotAliasViaSanitize(t *testing.T) {
+func TestApplyOAuthModelAlias_DoesNotInjectDefaultGitHubCopilotAliasViaSanitize(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.SanitizeOAuthModelAlias()
 
@@ -100,8 +100,34 @@ func TestApplyOAuthModelAlias_DefaultGitHubCopilotAliasViaSanitize(t *testing.T)
 	}
 
 	out := applyOAuthModelAlias(cfg, "github-copilot", "oauth", models)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 model (no default alias), got %d", len(out))
+	}
+	if out[0].ID != "claude-opus-4.6" {
+		t.Fatalf("expected model id %q, got %q", "claude-opus-4.6", out[0].ID)
+	}
+	if out[0].Name != "models/claude-opus-4.6" {
+		t.Fatalf("expected model name %q, got %q", "models/claude-opus-4.6", out[0].Name)
+	}
+}
+
+func TestApplyOAuthModelAlias_ManualGitHubCopilotAliasViaSanitize(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"github-copilot": {
+				{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
+			},
+		},
+	}
+	cfg.SanitizeOAuthModelAlias()
+
+	models := []*ModelInfo{
+		{ID: "claude-opus-4.6", Name: "models/claude-opus-4.6"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "github-copilot", "oauth", models)
 	if len(out) != 2 {
-		t.Fatalf("expected 2 models (original + default alias), got %d", len(out))
+		t.Fatalf("expected 2 models (original + manual alias), got %d", len(out))
 	}
 	if out[0].ID != "claude-opus-4.6" {
 		t.Fatalf("expected first model id %q, got %q", "claude-opus-4.6", out[0].ID)

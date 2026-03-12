@@ -241,3 +241,23 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
 	}
 }
+
+func TestApplyOAuthModelAlias_GitHubCopilotManualAlias(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"github-copilot": {
+			{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "test-auth", Provider: "github-copilot"}
+	got := mgr.applyOAuthModelAlias(auth, "claude-opus-4-6")
+	if got != "claude-opus-4.6" {
+		t.Fatalf("applyOAuthModelAlias() = %q, want %q", got, "claude-opus-4.6")
+	}
+}
