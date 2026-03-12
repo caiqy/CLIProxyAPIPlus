@@ -70,6 +70,20 @@ func TestGitHubCopilotNormalizeModel_StripsSuffix(t *testing.T) {
 	}
 }
 
+func TestGitHubCopilotNormalizeModel_OverridesBodyModel(t *testing.T) {
+	t.Parallel()
+
+	e := &GitHubCopilotExecutor{}
+
+	body := []byte(`{"model":"claude-opus-4-6","messages":[]}`)
+	got := e.normalizeModel("claude-opus-4.6", body)
+
+	gotModel := gjson.GetBytes(got, "model").String()
+	if gotModel != "claude-opus-4.6" {
+		t.Fatalf("normalizeModel() model = %q, want %q", gotModel, "claude-opus-4.6")
+	}
+}
+
 func TestUseGitHubCopilotResponsesEndpoint_OpenAIResponseSource(t *testing.T) {
 	t.Parallel()
 	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai-response"), "claude-3-5-sonnet") {

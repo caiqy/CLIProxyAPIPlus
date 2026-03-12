@@ -921,9 +921,13 @@ func detectVisionContent(body []byte) bool {
 // suffixed model identifiers.
 func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte {
 	baseModel := thinking.ParseSuffix(model).ModelName
-	if baseModel != model {
-		body, _ = sjson.SetBytes(body, "model", baseModel)
+	if strings.TrimSpace(baseModel) == "" {
+		return body
 	}
+	// Ensure upstream request body always uses the executor-resolved model.
+	// This covers both suffix stripping and OAuth model alias resolution, even
+	// when the translator keeps the original payload's model field unchanged.
+	body, _ = sjson.SetBytes(body, "model", baseModel)
 	return body
 }
 
