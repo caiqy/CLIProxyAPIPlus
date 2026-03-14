@@ -98,6 +98,11 @@ type ModelRegistration struct {
 	SuspendedClients map[string]string
 }
 
+type modelProviderCount struct {
+	name  string
+	count int
+}
+
 // ModelRegistryHook provides optional callbacks for external integrations to track model list changes.
 // Hook implementations must be non-blocking and resilient; calls are executed asynchronously and panics are recovered.
 type ModelRegistryHook interface {
@@ -934,15 +939,11 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	defer r.mutex.RUnlock()
 
 	registration, exists := r.models[modelID]
-	if !exists || registration == nil || len(registration.Providers) == 0 {
+	if !exists || registration == nil {
 		return nil
 	}
 
-	type providerCount struct {
-		name  string
-		count int
-	}
-	providers := make([]providerCount, 0, len(registration.Providers))
+	providers := make([]modelProviderCount, 0, len(registration.Providers))
 	// suspendedByProvider := make(map[string]int)
 	// if registration.SuspendedClients != nil {
 	// 	for clientID := range registration.SuspendedClients {
@@ -960,7 +961,10 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 		// 	continue
 		// }
 		// providers = append(providers, providerCount{name: name, count: adjusted})
-		providers = append(providers, providerCount{name: name, count: count})
+		providers = append(providers, modelProviderCount{name: name, count: count})
+	}
+	if len(providers) == 0 && registration.Count > 0 {
+		providers = r.collectProviderCountsFromClientsLocked(modelID)
 	}
 	if len(providers) == 0 {
 		return nil
@@ -978,6 +982,38 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 		result = append(result, item.name)
 	}
 	return result
+}
+
+func (r *ModelRegistry) collectProviderCountsFromClientsLocked(modelID string) []modelProviderCount {
+	if strings.TrimSpace(modelID) == "" {
+		return nil
+	}
+
+	counts := make(map[string]int)
+	for clientID, provider := range r.clientProviders {
+		provider = strings.TrimSpace(provider)
+		if provider == "" {
+			continue
+		}
+		for _, candidate := range r.clientModels[clientID] {
+			if !strings.EqualFold(strings.TrimSpace(candidate), modelID) {
+				continue
+			}
+			counts[provider]++
+		}
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+
+	providers := make([]modelProviderCount, 0, len(counts))
+	for name, count := range counts {
+		if count <= 0 {
+			continue
+		}
+		providers = append(providers, modelProviderCount{name: name, count: count})
+	}
+	return providers
 }
 
 // GetModelInfo returns ModelInfo, prioritizing provider-specific definition if available.
