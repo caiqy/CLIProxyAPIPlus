@@ -4,16 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -46,6 +48,11 @@ const (
 	copilotOpenAIIntent  = "conversation-agent"
 	copilotGitHubAPIVer  = "2025-10-01"
 	copilotAnthropicBeta = "advanced-tool-use-2025-11-20,interleaved-thinking-2025-05-14"
+
+	githubCopilotHeaderDiffTypeMissing        = "missing"
+	githubCopilotHeaderDiffTypeExtra          = "extra"
+	githubCopilotHeaderDiffTypeValueMismatch  = "value_mismatch"
+	githubCopilotHeaderDiffTypeSourceMismatch = "source_mismatch"
 )
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
@@ -54,6 +61,7 @@ type GitHubCopilotExecutor struct {
 	mu              sync.RWMutex
 	cache           map[string]*cachedAPIToken
 	initiatorBypass *initiatorBypassManager
+	dualRunDiffSink func(githubCopilotHeaderDiffRecord)
 }
 
 // cachedAPIToken stores a cached Copilot API token with its expiry.
@@ -116,8 +124,39 @@ func (e *GitHubCopilotExecutor) PrepareRequest(req *http.Request, auth *cliproxy
 		return errToken
 	}
 	useMessages := req.URL != nil && strings.HasPrefix(req.URL.Path, githubCopilotMessagesPath)
-	e.applyHeaders(req, apiToken, nil, false, useMessages, nil)
+	e.applyHeaders(req, apiToken, auth, nil, false, useMessages, nil)
 	return nil
+}
+
+func copilotContextHeaderValue(auth *cliproxyauth.Auth, key string) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	value, ok := auth.Metadata[key].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func applyGitHubCopilotContextHeaders(r *http.Request, auth *cliproxyauth.Auth) {
+	if r == nil {
+		return
+	}
+	mappings := []struct {
+		metadataKey string
+		headerKey   string
+	}{
+		{metadataKey: "editor_device_id", headerKey: "Editor-Device-Id"},
+		{metadataKey: "vscode_abexpcontext", headerKey: "Vscode-Abexpcontext"},
+		{metadataKey: "vscode_machineid", headerKey: "Vscode-Machineid"},
+	}
+	for _, mapping := range mappings {
+		r.Header.Del(mapping.headerKey)
+		if value := copilotContextHeaderValue(auth, mapping.metadataKey); value != "" {
+			r.Header.Set(mapping.headerKey, value)
+		}
+	}
 }
 
 func isGitHubCopilotInternalAPIRequest(req *http.Request) bool {
@@ -226,7 +265,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	if err != nil {
 		return resp, err
 	}
-	e.applyHeaders(httpReq, apiToken, body, false, useMessages, extraBetas)
+	e.applyHeaders(httpReq, apiToken, auth, body, false, useMessages, extraBetas)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
@@ -380,7 +419,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if err != nil {
 		return nil, err
 	}
-	e.applyHeaders(httpReq, apiToken, body, true, useMessages, extraBetas)
+	e.applyHeaders(httpReq, apiToken, auth, body, true, useMessages, extraBetas)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
@@ -623,59 +662,88 @@ func (e *GitHubCopilotExecutor) initiatorBypassIdentity(auth *cliproxyauth.Auth,
 }
 
 // applyHeaders sets the required headers for GitHub Copilot API requests.
-func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, body []byte, stream bool, useMessages bool, extraBetas []string) {
+func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, auth *cliproxyauth.Auth, body []byte, stream bool, useMessages bool, extraBetas []string) {
 	var ginHeaders http.Header
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
+	policy := e.githubCopilotHeaderPolicy()
+	mode := strings.TrimSpace(strings.ToLower(policy.Mode))
 
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Authorization", "Bearer "+apiToken)
-	if stream {
-		r.Header.Set("Accept", "text/event-stream")
-	} else {
-		r.Header.Set("Accept", "application/json")
+	if mode == config.GitHubCopilotHeaderPolicyModeStrict {
+		r.Header = make(http.Header)
 	}
+
+	setGitHubCopilotBaseHeaders(r.Header, apiToken, stream)
+
+	switch mode {
+	case config.GitHubCopilotHeaderPolicyModeStrict:
+		compiled, _ := e.compileGitHubCopilotPolicyHeaders(ginHeaders, auth, body, apiToken, policy, policy.SessionStateFile, true, useMessages, extraBetas, false)
+		applyHeadersFromMap(r.Header, compiled)
+	case config.GitHubCopilotHeaderPolicyModeDualRun:
+		e.applyGitHubCopilotLegacyHeaders(r, ginHeaders, auth, body, useMessages, extraBetas)
+		legacy := r.Header.Clone()
+		candidate, candidateAudit := e.compileGitHubCopilotPolicyHeaders(ginHeaders, auth, body, apiToken, policy, policy.ShadowStateFile, true, useMessages, extraBetas, false)
+		e.emitGitHubCopilotDualRunDiffs(legacy, candidate, candidateAudit)
+	default:
+		e.applyGitHubCopilotLegacyHeaders(r, ginHeaders, auth, body, useMessages, extraBetas)
+	}
+}
+
+type githubCopilotHeaderDiffSide struct {
+	Source          string
+	NormalizedValue string
+	ValueHash       string
+}
+
+type githubCopilotHeaderDiffRecord struct {
+	Header    string
+	DiffType  string
+	Legacy    githubCopilotHeaderDiffSide
+	Candidate githubCopilotHeaderDiffSide
+}
+
+func (e *GitHubCopilotExecutor) githubCopilotHeaderPolicy() config.GitHubCopilotHeaderPolicyConfig {
+	if e == nil || e.cfg == nil {
+		return config.GitHubCopilotHeaderPolicyConfig{Mode: config.GitHubCopilotHeaderPolicyModeLegacy}
+	}
+	policy := sanitizeGitHubCopilotHeaderPolicy(e.cfg.GitHubCopilot.HeaderPolicy)
+	mode := strings.TrimSpace(strings.ToLower(policy.Mode))
+	switch mode {
+	case config.GitHubCopilotHeaderPolicyModeDualRun, config.GitHubCopilotHeaderPolicyModeStrict:
+		policy.Mode = mode
+	default:
+		policy.Mode = config.GitHubCopilotHeaderPolicyModeLegacy
+	}
+	return policy
+}
+
+func setGitHubCopilotBaseHeaders(headers http.Header, apiToken string, stream bool) {
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Authorization", "Bearer "+apiToken)
+	if stream {
+		headers.Set("Accept", "text/event-stream")
+	} else {
+		headers.Set("Accept", "application/json")
+	}
+	headers.Set("Openai-Intent", copilotOpenAIIntent)
+	headers.Set("Copilot-Integration-Id", copilotIntegrationID)
+	headers.Set("X-Github-Api-Version", copilotGitHubAPIVer)
+}
+
+func (e *GitHubCopilotExecutor) applyGitHubCopilotLegacyHeaders(r *http.Request, incoming http.Header, auth *cliproxyauth.Auth, body []byte, useMessages bool, extraBetas []string) {
 	r.Header.Set("User-Agent", copilotUserAgent)
 	r.Header.Set("Editor-Version", copilotEditorVersion)
 	r.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
-	r.Header.Set("Openai-Intent", copilotOpenAIIntent)
-	r.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
-	r.Header.Set("X-Github-Api-Version", copilotGitHubAPIVer)
-	r.Header.Set("X-Request-Id", uuid.NewString())
+	r.Header.Set("X-Request-Id", generateGitHubCopilotLegacyRequestID())
+
 	if useMessages {
-		baseBeta := copilotAnthropicBeta
-		// Build deduplicated beta set: defaults + user header + body betas.
-		betaSet := make(map[string]bool)
-		for _, b := range strings.Split(baseBeta, ",") {
-			if trimmed := strings.TrimSpace(b); trimmed != "" {
-				betaSet[trimmed] = true
-			}
-		}
-		if ginHeaders != nil {
-			if v := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); v != "" {
-				for _, b := range strings.Split(v, ",") {
-					if trimmed := strings.TrimSpace(b); trimmed != "" && !betaSet[trimmed] {
-						betaSet[trimmed] = true
-						baseBeta += "," + trimmed
-					}
-				}
-			}
-		}
-		for _, b := range extraBetas {
-			if trimmed := strings.TrimSpace(b); trimmed != "" && !betaSet[trimmed] {
-				betaSet[trimmed] = true
-				baseBeta += "," + trimmed
-			}
-		}
-		r.Header.Set("Anthropic-Beta", baseBeta)
+		r.Header.Set("Anthropic-Beta", mergeGitHubCopilotBetaValues(copilotAnthropicBeta, incoming, extraBetas, true))
 	} else {
 		r.Header.Del("Anthropic-Beta")
 	}
 
 	forwardHeaders := []string{
-		"Vscode-Abexpcontext",
-		"Vscode-Machineid",
 		"Vscode-Sessionid",
 		"X-Agent-Task-Id",
 		"X-Interaction-Id",
@@ -688,25 +756,251 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
 		"Accept-Encoding",
 		"X-Request-Id",
 	}
-	if ginHeaders != nil {
+	if incoming != nil {
 		for _, key := range forwardHeaders {
-			if v := strings.TrimSpace(ginHeaders.Get(key)); v != "" {
+			if v := strings.TrimSpace(incoming.Get(key)); v != "" {
 				r.Header.Set(key, v)
 			}
 		}
 	}
 
-	if strings.TrimSpace(r.Header.Get("X-Agent-Task-Id")) == "" {
-		if requestID := strings.TrimSpace(r.Header.Get("X-Request-Id")); requestID != "" {
-			r.Header.Set("X-Agent-Task-Id", requestID)
-		}
+	applyGitHubCopilotContextHeaders(r, auth)
+
+	if requestID := strings.TrimSpace(r.Header.Get("X-Request-Id")); requestID != "" {
+		r.Header.Set("X-Agent-Task-Id", requestID)
+	} else {
+		r.Header.Del("X-Agent-Task-Id")
 	}
 
-	initiator := "user"
-	if containsAgentConversationRole(body) {
-		initiator = "agent"
+	r.Header.Set("X-Initiator", githubCopilotHeaderInitiator(body))
+}
+
+func generateGitHubCopilotLegacyRequestID() string {
+	requestID, _ := generateGitHubCopilotRequestID()
+	return requestID
+}
+
+func mergeGitHubCopilotBetaValues(base string, incoming http.Header, extraBetas []string, includeIncoming bool) string {
+	betaSet := make(map[string]bool)
+	ordered := make([]string, 0, 8)
+	appendValue := func(raw string) {
+		for _, token := range strings.Split(raw, ",") {
+			trimmed := strings.TrimSpace(token)
+			if trimmed == "" || betaSet[trimmed] {
+				continue
+			}
+			betaSet[trimmed] = true
+			ordered = append(ordered, trimmed)
+		}
 	}
-	r.Header.Set("X-Initiator", initiator)
+	appendValue(base)
+	if includeIncoming && incoming != nil {
+		appendValue(incoming.Get("Anthropic-Beta"))
+	}
+	for _, beta := range extraBetas {
+		appendValue(beta)
+	}
+	return strings.Join(ordered, ",")
+}
+
+func (e *GitHubCopilotExecutor) compileGitHubCopilotPolicyHeaders(incoming http.Header, auth *cliproxyauth.Auth, body []byte, apiToken string, policy config.GitHubCopilotHeaderPolicyConfig, stateFile string, strict bool, useMessages bool, extraBetas []string, includeIncomingBetas bool) (http.Header, githubCopilotHeaderCompileAudit) {
+	compiler := newGitHubCopilotHeaderCompiler(strict, policy)
+	if trimmedStateFile := strings.TrimSpace(stateFile); trimmedStateFile != "" {
+		compiler.sessionStateManager = newGitHubCopilotSessionStateManager(trimmedStateFile)
+	}
+	compileContext := githubCopilotHeaderCompileContext{
+		Body:           body,
+		Model:          strings.TrimSpace(gjson.GetBytes(body, "model").String()),
+		BucketIdentity: e.initiatorBypassIdentity(auth, apiToken),
+	}
+	headers, audit := compiler.CompileWithAudit(incoming, auth, compileContext)
+	if useMessages {
+		mergedBeta := mergeGitHubCopilotBetaValues(headers.Get("Anthropic-Beta"), incoming, extraBetas, includeIncomingBetas)
+		if mergedBeta == "" {
+			headers.Del("Anthropic-Beta")
+		} else {
+			headers.Set("Anthropic-Beta", mergedBeta)
+		}
+	} else {
+		headers.Del("Anthropic-Beta")
+	}
+	return headers, audit
+}
+
+func applyHeadersFromMap(target http.Header, source http.Header) {
+	for key := range source {
+		values := source.Values(key)
+		target.Del(key)
+		for _, value := range values {
+			target.Add(key, value)
+		}
+	}
+}
+
+func (e *GitHubCopilotExecutor) emitGitHubCopilotDualRunDiffs(legacy, candidate http.Header, candidateAudit githubCopilotHeaderCompileAudit) {
+	for _, diff := range buildGitHubCopilotHeaderDiffs(legacy, candidate, candidateAudit) {
+		if e != nil && e.dualRunDiffSink != nil {
+			e.dualRunDiffSink(diff)
+			continue
+		}
+		legacyNormalized := diff.Legacy.NormalizedValue
+		candidateNormalized := diff.Candidate.NormalizedValue
+		if isGitHubCopilotSensitiveHeader(diff.Header) {
+			if legacyNormalized != "" {
+				legacyNormalized = "[REDACTED]"
+			}
+			if candidateNormalized != "" {
+				candidateNormalized = "[REDACTED]"
+			}
+		}
+		log.WithFields(log.Fields{
+			"header":                     diff.Header,
+			"diff_type":                  diff.DiffType,
+			"legacy.source":              diff.Legacy.Source,
+			"legacy.normalized_value":    legacyNormalized,
+			"legacy.value_hash":          diff.Legacy.ValueHash,
+			"candidate.source":           diff.Candidate.Source,
+			"candidate.normalized_value": candidateNormalized,
+			"candidate.value_hash":       diff.Candidate.ValueHash,
+		}).Info("github-copilot executor: dual-run header diff")
+	}
+}
+
+func isGitHubCopilotSensitiveHeader(header string) bool {
+	switch strings.ToLower(strings.TrimSpace(header)) {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildGitHubCopilotHeaderDiffs(legacy, candidate http.Header, candidateAudit githubCopilotHeaderCompileAudit) []githubCopilotHeaderDiffRecord {
+	if legacy == nil {
+		legacy = http.Header{}
+	}
+	if candidate == nil {
+		candidate = http.Header{}
+	}
+	candidateSources := map[string]string{}
+	for key, source := range candidateAudit.HeaderSources {
+		candidateSources[http.CanonicalHeaderKey(key)] = strings.TrimSpace(source)
+	}
+
+	keys := map[string]struct{}{}
+	for key := range legacy {
+		keys[http.CanonicalHeaderKey(key)] = struct{}{}
+	}
+	for key := range candidate {
+		keys[http.CanonicalHeaderKey(key)] = struct{}{}
+	}
+	sortedKeys := make([]string, 0, len(keys))
+	for key := range keys {
+		sortedKeys = append(sortedKeys, key)
+	}
+	sort.Strings(sortedKeys)
+
+	result := make([]githubCopilotHeaderDiffRecord, 0, len(sortedKeys))
+	for _, key := range sortedKeys {
+		legacyValue := normalizeGitHubCopilotHeaderValue(legacy.Values(key))
+		candidateValue := normalizeGitHubCopilotHeaderValue(candidate.Values(key))
+		if legacyValue == "" && candidateValue == "" {
+			continue
+		}
+
+		legacySource := githubCopilotHeaderSourceNone
+		if legacyValue != "" {
+			legacySource = githubCopilotHeaderSourceComputed
+		}
+		candidateSource := githubCopilotHeaderSourceNone
+		if source := strings.TrimSpace(candidateSources[key]); source != "" {
+			candidateSource = source
+		} else if candidateValue != "" {
+			candidateSource = githubCopilotHeaderSourceComputed
+		}
+		legacySource = normalizeGitHubCopilotHeaderSource(legacySource, legacyValue != "")
+		candidateSource = normalizeGitHubCopilotHeaderSource(candidateSource, candidateValue != "")
+
+		diffType := ""
+		switch {
+		case legacyValue != "" && candidateValue == "":
+			diffType = githubCopilotHeaderDiffTypeMissing
+		case legacyValue == "" && candidateValue != "":
+			diffType = githubCopilotHeaderDiffTypeExtra
+		case legacyValue != candidateValue:
+			diffType = githubCopilotHeaderDiffTypeValueMismatch
+		case legacySource != candidateSource:
+			diffType = githubCopilotHeaderDiffTypeSourceMismatch
+		default:
+			continue
+		}
+
+		record := githubCopilotHeaderDiffRecord{
+			Header:   key,
+			DiffType: diffType,
+			Legacy: githubCopilotHeaderDiffSide{
+				Source:          legacySource,
+				NormalizedValue: legacyValue,
+				ValueHash:       hashGitHubCopilotHeaderValue(key, legacyValue),
+			},
+			Candidate: githubCopilotHeaderDiffSide{
+				Source:          candidateSource,
+				NormalizedValue: candidateValue,
+				ValueHash:       hashGitHubCopilotHeaderValue(key, candidateValue),
+			},
+		}
+		result = append(result, record)
+	}
+	return result
+}
+
+func normalizeGitHubCopilotHeaderSource(source string, hasValue bool) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case githubCopilotHeaderSourceComputed, "legacy-runtime", "legacy":
+		return githubCopilotHeaderSourceComputed
+	case githubCopilotHeaderSourceAuthMetadata, "auth-metadata":
+		return githubCopilotHeaderSourceAuthMetadata
+	case githubCopilotHeaderSourceConfig, "policy":
+		return githubCopilotHeaderSourceConfig
+	case githubCopilotHeaderSourceConstant, "default":
+		return githubCopilotHeaderSourceConstant
+	case githubCopilotHeaderSourceNone, "":
+		if hasValue {
+			return githubCopilotHeaderSourceComputed
+		}
+		return githubCopilotHeaderSourceConstant
+	default:
+		if hasValue {
+			return githubCopilotHeaderSourceComputed
+		}
+		return githubCopilotHeaderSourceConstant
+	}
+}
+
+func normalizeGitHubCopilotHeaderValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(strings.Join(strings.Fields(value), " "))
+		if trimmed != "" {
+			normalized = append(normalized, trimmed)
+		}
+	}
+	if len(normalized) == 0 {
+		return ""
+	}
+	sort.Strings(normalized)
+	return strings.Join(normalized, ",")
+}
+
+func hashGitHubCopilotHeaderValue(header, normalizedValue string) string {
+	if strings.TrimSpace(normalizedValue) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(header)) + "\n" + normalizedValue))
+	return hex.EncodeToString(sum[:])
 }
 
 func selectGitHubCopilotEndpoint(sourceFormat sdktranslator.Format, model string) string {

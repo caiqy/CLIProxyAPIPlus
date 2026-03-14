@@ -109,6 +109,19 @@ nonstream-keepalive-interval: 0
 
 # GitHub Copilot executor behavior overrides
 # github-copilot:
+#   header-policy:
+#     # legacy (default): send headers with legacy behavior (includes selective passthrough)
+#     # dual-run: send legacy headers, but also compute strict candidate headers + diff telemetry
+#     # strict: no incoming passthrough; all governed headers are compiled deterministically
+#     mode: legacy # legacy / dual-run / strict
+#     user-agent: GitHubCopilotChat/0.39.0
+#     editor-version: vscode/1.111.0
+#     editor-plugin-version: copilot-chat/0.39.0
+#     anthropic-beta: advanced-tool-use-2025-11-20
+#     # state file used by strict/dual-run candidate session resolver
+#     session-state-file: /CLIProxyAPIBusiness/data/copilot_session_state.json
+#     # dual-run-only shadow state file (prevents candidate run from mutating primary state)
+#     shadow-state-file: /CLIProxyAPIBusiness/data/copilot_session_state.shadow.json
 #   force-agent-initiator: true
 #   fake-assistant-content: "OK."
 #   force-agent-initiator-bypass:

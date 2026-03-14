@@ -21,6 +21,10 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+
+	GitHubCopilotHeaderPolicyModeLegacy  = "legacy"
+	GitHubCopilotHeaderPolicyModeDualRun = "dual-run"
+	GitHubCopilotHeaderPolicyModeStrict  = "strict"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -259,6 +263,9 @@ type AmpCode struct {
 
 // GitHubCopilotConfig holds behavioral overrides for the GitHub Copilot executor.
 type GitHubCopilotConfig struct {
+	// HeaderPolicy configures deterministic header behavior for GitHub Copilot requests.
+	HeaderPolicy GitHubCopilotHeaderPolicyConfig `yaml:"header-policy" json:"header-policy"`
+
 	// ForceAgentInitiator injects a fake assistant message into requests that
 	// contain no assistant/tool turns, causing X-Initiator to be set to "agent".
 	// The injected message is placed immediately before the last user turn.
@@ -273,6 +280,17 @@ type GitHubCopilotConfig struct {
 	// force-agent-initiator. When enabled, requests that would otherwise be forced
 	// to agent can bypass injection once per rolling window.
 	ForceAgentInitiatorBypass ForceAgentInitiatorBypassConfig `yaml:"force-agent-initiator-bypass" json:"force-agent-initiator-bypass"`
+}
+
+// GitHubCopilotHeaderPolicyConfig configures default header values and mode.
+type GitHubCopilotHeaderPolicyConfig struct {
+	Mode                string `yaml:"mode" json:"mode"`
+	UserAgent           string `yaml:"user-agent" json:"user-agent"`
+	EditorVersion       string `yaml:"editor-version" json:"editor-version"`
+	EditorPluginVersion string `yaml:"editor-plugin-version" json:"editor-plugin-version"`
+	AnthropicBeta       string `yaml:"anthropic-beta" json:"anthropic-beta"`
+	SessionStateFile    string `yaml:"session-state-file" json:"session-state-file"`
+	ShadowStateFile     string `yaml:"shadow-state-file" json:"shadow-state-file"`
 }
 
 // ForceAgentInitiatorBypassConfig controls periodic bypass behavior for
@@ -639,6 +657,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
+	cfg.GitHubCopilot.HeaderPolicy.Mode = GitHubCopilotHeaderPolicyModeLegacy
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
@@ -731,6 +750,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// Sanitize GitHub Copilot config defaults.
+	cfg.SanitizeGitHubCopilotConfig()
+
 	// NOTE: Legacy migration persistence is intentionally disabled together with
 	// startup legacy migration to keep startup read-only for config.yaml.
 	// Re-enable the block below if automatic startup migration is needed again.
@@ -748,6 +770,31 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizeGitHubCopilotConfig normalizes GitHub Copilot configuration values.
+func (cfg *Config) SanitizeGitHubCopilotConfig() {
+	if cfg == nil {
+		return
+	}
+
+	policy := &cfg.GitHubCopilot.HeaderPolicy
+	policy.Mode = strings.ToLower(strings.TrimSpace(policy.Mode))
+	switch policy.Mode {
+	case "", GitHubCopilotHeaderPolicyModeLegacy:
+		policy.Mode = GitHubCopilotHeaderPolicyModeLegacy
+	case GitHubCopilotHeaderPolicyModeDualRun, GitHubCopilotHeaderPolicyModeStrict:
+		// Keep configured value.
+	default:
+		policy.Mode = GitHubCopilotHeaderPolicyModeLegacy
+	}
+
+	policy.UserAgent = strings.TrimSpace(policy.UserAgent)
+	policy.EditorVersion = strings.TrimSpace(policy.EditorVersion)
+	policy.EditorPluginVersion = strings.TrimSpace(policy.EditorPluginVersion)
+	policy.AnthropicBeta = strings.TrimSpace(policy.AnthropicBeta)
+	policy.SessionStateFile = strings.TrimSpace(policy.SessionStateFile)
+	policy.ShadowStateFile = strings.TrimSpace(policy.ShadowStateFile)
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
