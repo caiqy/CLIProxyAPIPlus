@@ -1981,15 +1981,16 @@ const (
 // It exchanges the GitHub access token stored in auth.Metadata for a Copilot API token,
 // then queries the /models endpoint. Falls back to the static registry on any failure.
 func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	staticModels := registry.GetGitHubCopilotModels()
 	if auth == nil {
 		log.Debug("github-copilot: auth is nil, using static models")
-		return registry.GetGitHubCopilotModels()
+		return staticModels
 	}
 
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	if accessToken == "" {
 		log.Debug("github-copilot: no access_token in auth metadata, using static models")
-		return registry.GetGitHubCopilotModels()
+		return staticModels
 	}
 
 	copilotAuth := copilotauth.NewCopilotAuth(cfg)
@@ -1997,23 +1998,26 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 	entries, err := copilotAuth.ListModelsWithGitHubToken(ctx, accessToken)
 	if err != nil {
 		log.Warnf("github-copilot: failed to fetch dynamic models: %v, using static models", err)
-		return registry.GetGitHubCopilotModels()
+		return staticModels
 	}
 
 	if len(entries) == 0 {
 		log.Debug("github-copilot: API returned no models, using static models")
-		return registry.GetGitHubCopilotModels()
+		return staticModels
 	}
 
 	// Build a lookup from the static definitions so we can enrich dynamic entries
 	// with known context lengths, thinking support, etc.
-	staticMap := make(map[string]*registry.ModelInfo)
-	for _, m := range registry.GetGitHubCopilotModels() {
+	staticMap := make(map[string]*registry.ModelInfo, len(staticModels))
+	for _, m := range staticModels {
+		if m == nil || m.ID == "" {
+			continue
+		}
 		staticMap[m.ID] = m
 	}
 
 	now := time.Now().Unix()
-	models := make([]*registry.ModelInfo, 0, len(entries))
+	models := make([]*registry.ModelInfo, 0, len(entries)+len(staticModels))
 	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if entry.ID == "" {
@@ -2062,7 +2066,36 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 		models = append(models, m)
 	}
 
-	log.Infof("github-copilot: fetched %d models from API", len(models))
+	dynamicCount := len(models)
+	var missingStaticIDs []string
+	missingStatic := 0
+	for _, m := range staticModels {
+		if m == nil || m.ID == "" {
+			continue
+		}
+		if _, ok := seen[m.ID]; ok {
+			continue
+		}
+		models = append(models, m)
+		missingStatic++
+		if len(missingStaticIDs) < 10 {
+			missingStaticIDs = append(missingStaticIDs, m.ID)
+		}
+	}
+	if missingStatic > 0 {
+		log.Warnf(
+			"github-copilot: API model list missing %d static models; keeping static fallback (sample=%s)",
+			missingStatic,
+			strings.Join(missingStaticIDs, ","),
+		)
+	}
+
+	log.Infof(
+		"github-copilot: fetched %d models from API, merged with %d static models -> %d total",
+		dynamicCount,
+		len(staticModels),
+		len(models),
+	)
 	return models
 }
 
