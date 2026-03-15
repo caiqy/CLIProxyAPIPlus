@@ -63,3 +63,49 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 		t.Fatal("expected global excluded model to be present when attribute override is set")
 	}
 }
+
+func TestApplyExcludedModelsWithAlias_ExcludesAliasWhenOriginalIsExcluded(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {
+				{Name: "gpt-5", Alias: "gpt-5-renamed", Fork: false},
+			},
+		},
+	}
+
+	models := []*ModelInfo{
+		{ID: "gpt-5-renamed"},
+		{ID: "gpt-4.1"},
+	}
+
+	got := applyExcludedModelsWithAlias(cfg, "codex", "oauth", models, []string{"gpt-5"})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 model after exclusion, got %d", len(got))
+	}
+	if got[0] == nil || !strings.EqualFold(strings.TrimSpace(got[0].ID), "gpt-4.1") {
+		t.Fatalf("unexpected remaining model: %+v", got[0])
+	}
+}
+
+func TestApplyExcludedModelsWithAlias_ExcludesOriginalWhenAliasIsExcluded(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {
+				{Name: "gpt-5", Alias: "gpt-5-renamed", Fork: false},
+			},
+		},
+	}
+
+	models := []*ModelInfo{
+		{ID: "gpt-5"},
+		{ID: "gpt-4.1"},
+	}
+
+	got := applyExcludedModelsWithAlias(cfg, "codex", "oauth", models, []string{"gpt-5-renamed"})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 model after exclusion, got %d", len(got))
+	}
+	if got[0] == nil || !strings.EqualFold(strings.TrimSpace(got[0].ID), "gpt-4.1") {
+		t.Fatalf("unexpected remaining model: %+v", got[0])
+	}
+}

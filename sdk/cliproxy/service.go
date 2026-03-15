@@ -816,7 +816,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
@@ -828,18 +828,18 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "antigravity":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		models = executor.FetchAntigravityModels(ctx, a, s.cfg)
 		cancel()
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
 		if entry := s.resolveConfigClaudeKey(a); entry != nil {
@@ -850,7 +850,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "codex":
 		models = registry.GetOpenAIModels()
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
@@ -861,27 +861,27 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "qwen":
 		models = registry.GetQwenModels()
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "iflow":
 		models = registry.GetIFlowModels()
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
-    models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "github-copilot":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		models = executor.FetchGitHubCopilotModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "kiro":
 		models = s.fetchKiroModels(a)
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	case "kilo":
 		models = executor.FetchKiloModels(context.Background(), a, s.cfg)
-		models = applyExcludedModels(models, excluded)
+		models = applyExcludedModelsWithAlias(s.cfg, provider, authKind, models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -1157,7 +1157,7 @@ func (s *Service) backfillAntigravityModels(source *coreauth.Auth, primaryModels
 			}
 		}
 
-		models := applyExcludedModels(primaryModels, excluded)
+		models := applyExcludedModelsWithAlias(s.cfg, "antigravity", authKind, primaryModels, excluded)
 		models = applyOAuthModelAlias(s.cfg, "antigravity", authKind, models)
 		if len(models) == 0 {
 			continue
@@ -1166,6 +1166,89 @@ func (s *Service) backfillAntigravityModels(source *coreauth.Auth, primaryModels
 		reg.RegisterClient(candidateID, "antigravity", applyModelPrefixes(models, candidate.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
 		log.Debugf("antigravity models backfilled for auth %s using primary model list", candidateID)
 	}
+}
+
+func applyExcludedModelsWithAlias(cfg *config.Config, provider, authKind string, models []*ModelInfo, excluded []string) []*ModelInfo {
+	expandedExcluded := expandExcludedWithOAuthModelAlias(cfg, provider, authKind, excluded)
+	return applyExcludedModels(models, expandedExcluded)
+}
+
+func expandExcludedWithOAuthModelAlias(cfg *config.Config, provider, authKind string, excluded []string) []string {
+	if cfg == nil || len(excluded) == 0 {
+		return excluded
+	}
+	channel := coreauth.OAuthModelAliasChannel(provider, authKind)
+	if channel == "" || len(cfg.OAuthModelAlias) == 0 {
+		return excluded
+	}
+	entries := cfg.OAuthModelAlias[channel]
+	if len(entries) == 0 {
+		return excluded
+	}
+
+	type aliasPair struct {
+		name  string
+		alias string
+	}
+	pairs := make([]aliasPair, 0, len(entries))
+	for i := range entries {
+		name := strings.ToLower(strings.TrimSpace(entries[i].Name))
+		alias := strings.ToLower(strings.TrimSpace(entries[i].Alias))
+		if name == "" || alias == "" || name == alias {
+			continue
+		}
+		pairs = append(pairs, aliasPair{name: name, alias: alias})
+	}
+	if len(pairs) == 0 {
+		return excluded
+	}
+
+	set := make(map[string]struct{}, len(excluded))
+	queue := make([]string, 0, len(excluded))
+	for _, item := range excluded {
+		pattern := strings.ToLower(strings.TrimSpace(item))
+		if pattern == "" {
+			continue
+		}
+		if _, exists := set[pattern]; exists {
+			continue
+		}
+		set[pattern] = struct{}{}
+		queue = append(queue, pattern)
+	}
+	if len(queue) == 0 {
+		return excluded
+	}
+
+	addPattern := func(pattern string) {
+		pattern = strings.ToLower(strings.TrimSpace(pattern))
+		if pattern == "" {
+			return
+		}
+		if _, exists := set[pattern]; exists {
+			return
+		}
+		set[pattern] = struct{}{}
+		queue = append(queue, pattern)
+	}
+
+	for i := 0; i < len(queue); i++ {
+		pattern := queue[i]
+		for _, pair := range pairs {
+			if matchWildcard(pattern, pair.name) {
+				addPattern(pair.alias)
+			}
+			if matchWildcard(pattern, pair.alias) {
+				addPattern(pair.name)
+			}
+		}
+	}
+
+	out := make([]string, 0, len(queue))
+	for pattern := range set {
+		out = append(out, pattern)
+	}
+	return out
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
