@@ -241,9 +241,13 @@ func TestDebugModelRouteMemoryEndpoint_NoAuthAndContainsModelDiagnostics(t *test
 
 	var payload struct {
 		Runtime          map[string]any `json:"runtime"`
+		Process          map[string]any `json:"process"`
+		Registry         map[string]any `json:"registry"`
+		Limits           map[string]any `json:"limits"`
 		ModelDiagnostics []struct {
-			ModelID   string   `json:"model_id"`
-			Providers []string `json:"providers"`
+			ModelID   string         `json:"model_id"`
+			Providers []string       `json:"providers"`
+			Reg       map[string]any `json:"registry"`
 		} `json:"model_diagnostics"`
 		Config struct {
 			GitHubCopilotAliases []map[string]any `json:"github_copilot_aliases"`
@@ -256,6 +260,18 @@ func TestDebugModelRouteMemoryEndpoint_NoAuthAndContainsModelDiagnostics(t *test
 	if payload.Runtime == nil {
 		t.Fatal("runtime field should not be nil")
 	}
+	if payload.Process == nil {
+		t.Fatal("process field should not be nil")
+	}
+	if payload.Registry == nil {
+		t.Fatal("registry field should not be nil")
+	}
+	if payload.Limits == nil {
+		t.Fatal("limits field should not be nil")
+	}
+	if got, ok := payload.Limits["max_models"].(float64); !ok || got <= 0 {
+		t.Fatalf("expected limits.max_models to be positive number, got %v", payload.Limits["max_models"])
+	}
 
 	if len(payload.ModelDiagnostics) == 0 {
 		t.Fatal("model_diagnostics should not be empty")
@@ -267,6 +283,12 @@ func TestDebugModelRouteMemoryEndpoint_NoAuthAndContainsModelDiagnostics(t *test
 			foundSonnet = true
 			if len(item.Providers) == 0 || item.Providers[0] != "github-copilot" {
 				t.Fatalf("unexpected providers for claude-sonnet-4-6: %v", item.Providers)
+			}
+			if item.Reg == nil {
+				t.Fatal("expected registry field in model diagnostics")
+			}
+			if _, ok := item.Reg["model_id"]; !ok {
+				t.Fatalf("expected registry snapshot to include model_id, got %v", item.Reg)
 			}
 		}
 	}
