@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -206,5 +208,73 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
+	}
+}
+
+func TestDebugModelRouteMemoryEndpoint_NoAuthAndContainsModelDiagnostics(t *testing.T) {
+	server := newTestServer(t)
+
+	server.cfg.OAuthModelAlias = map[string][]proxyconfig.OAuthModelAlias{
+		"github-copilot": {
+			{Name: "claude-sonnet-4.6", Alias: "claude-sonnet-4-6", Fork: true},
+			{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
+		},
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-debug-model-route-memory-copilot"
+	modelRegistry.RegisterClient(clientID, "github-copilot", []*registry.ModelInfo{
+		{ID: "claude-sonnet-4-6", OwnedBy: "github-copilot"},
+		{ID: "claude-opus-4-6", OwnedBy: "github-copilot"},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/model-route-memory", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var payload struct {
+		Runtime          map[string]any `json:"runtime"`
+		ModelDiagnostics []struct {
+			ModelID   string   `json:"model_id"`
+			Providers []string `json:"providers"`
+		} `json:"model_diagnostics"`
+		Config struct {
+			GitHubCopilotAliases []map[string]any `json:"github_copilot_aliases"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response json: %v, body=%s", err, rr.Body.String())
+	}
+
+	if payload.Runtime == nil {
+		t.Fatal("runtime field should not be nil")
+	}
+
+	if len(payload.ModelDiagnostics) == 0 {
+		t.Fatal("model_diagnostics should not be empty")
+	}
+
+	foundSonnet := false
+	for _, item := range payload.ModelDiagnostics {
+		if item.ModelID == "claude-sonnet-4-6" {
+			foundSonnet = true
+			if len(item.Providers) == 0 || item.Providers[0] != "github-copilot" {
+				t.Fatalf("unexpected providers for claude-sonnet-4-6: %v", item.Providers)
+			}
+		}
+	}
+	if !foundSonnet {
+		t.Fatal("expected model_diagnostics to include claude-sonnet-4-6")
+	}
+
+	if len(payload.Config.GitHubCopilotAliases) == 0 {
+		t.Fatal("expected github_copilot_aliases to be present")
 	}
 }

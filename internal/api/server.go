@@ -365,6 +365,9 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
+	// Debug endpoint for model route + memory diagnostics (intentionally unauthenticated for field debugging).
+	s.engine.GET("/debug/model-route-memory", s.debugModelRouteMemoryHandler)
+
 	// Event logging endpoint - handles Claude Code telemetry requests
 	// Returns 200 OK to prevent 404 errors in logs
 	s.engine.POST("/api/event_logging/batch", AuthMiddleware(s.accessManager), func(c *gin.Context) {
