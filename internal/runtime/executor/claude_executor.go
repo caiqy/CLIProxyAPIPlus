@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -232,12 +233,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	if stream {
+		var accum usage.Detail
 		lines := bytes.Split(data, []byte("\n"))
 		for _, line := range lines {
 			if detail, ok := parseClaudeStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+				accumulateClaudeStreamUsage(&accum, detail)
 			}
 		}
+		publishAccumulatedClaudeUsage(ctx, reporter, accum)
 	} else {
 		reporter.publish(ctx, parseClaudeUsage(data))
 	}
@@ -404,9 +407,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if normalizerEnabled {
 				normalizer = newAnthropicSSELifecycleNormalizer()
 			}
+			// Claude SSE splits usage across message_start (input/cache) and
+			// message_delta (output). Accumulate across events and publish once.
+			var claudeUsageAccum usage.Detail
 			emitLine := func(line []byte) {
 				if detail, ok := parseClaudeStreamUsage(line); ok {
-					reporter.publish(ctx, detail)
+					accumulateClaudeStreamUsage(&claudeUsageAccum, detail)
 				}
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -452,6 +458,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					emitLine(finalizedLine)
 				}
 			}
+			publishAccumulatedClaudeUsage(ctx, reporter, claudeUsageAccum)
 			return
 		}
 
@@ -459,11 +466,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		// Claude SSE splits usage across message_start (input/cache) and
+		// message_delta (output). Accumulate across events and publish once.
+		var claudeUsageAccum usage.Detail
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := parseClaudeStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+				accumulateClaudeStreamUsage(&claudeUsageAccum, detail)
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -486,6 +496,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+		} else {
+			publishAccumulatedClaudeUsage(ctx, reporter, claudeUsageAccum)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil

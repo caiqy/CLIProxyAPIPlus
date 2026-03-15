@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -494,6 +495,10 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		responsesContentPartIDs := map[string]string{}
 		responsesReasoningSummaryPartIDs := map[string]string{}
 
+		// Claude SSE splits usage across message_start (input/cache) and
+		// message_delta (output). Accumulate across events and publish once.
+		var claudeUsageAccum usage.Detail
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
@@ -506,7 +511,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				}
 				if useMessages {
 					if detail, ok := parseClaudeStreamUsage(line); ok {
-						reporter.publish(ctx, detail)
+						accumulateClaudeStreamUsage(&claudeUsageAccum, detail)
 					}
 				} else if detail, ok := parseOpenAIStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
@@ -562,6 +567,11 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		} else {
+			// Publish accumulated Claude usage (input/cache from message_start,
+			// output from message_delta) before falling through to ensurePublished.
+			if useMessages {
+				publishAccumulatedClaudeUsage(ctx, reporter, claudeUsageAccum)
+			}
 			reporter.ensurePublished(ctx)
 		}
 	}()
