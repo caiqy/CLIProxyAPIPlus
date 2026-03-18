@@ -513,6 +513,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.ensureAuthDir(); err != nil {
 		return err
 	}
+	if _, errConfigureModels := configureModelCatalog(ctx, s.configPath); errConfigureModels != nil {
+		log.Warnf("failed to configure model catalog overlay: %v", errConfigureModels)
+	}
 
 	s.applyRetryConfig(s.cfg)
 
