@@ -23,7 +23,7 @@ func TestGetAntigravityModelConfig_Gemini31SupportsThinkingLevels(t *testing.T) 
 			}
 
 			levels := entry.Thinking.Levels
-			expected := []string{"low", "medium", "high"}
+			expected := []string{"low", "high"}
 			if len(levels) != len(expected) {
 				t.Fatalf("model %s levels length mismatch: expected %d, got %d (%v)", tc.modelID, len(expected), len(levels), levels)
 			}

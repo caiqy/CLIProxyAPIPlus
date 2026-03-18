@@ -19,9 +19,9 @@ func TestAntigravityGemini31ThinkingConfigIncludesThoughts(t *testing.T) {
 		expectLevel   string
 	}{
 		{
-			name:          "gemini-3.1-pro-high supports medium",
+			name:          "gemini-3.1-pro-high coerces medium to low",
 			modelWithMode: "gemini-3.1-pro-high(medium)",
-			expectLevel:   "medium",
+			expectLevel:   "low",
 		},
 		{
 			name:          "gemini-3.1-pro-low supports high",

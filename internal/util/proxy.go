@@ -4,6 +4,7 @@
 package util
 
 import (
+	"crypto/tls"
 	"net/http"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -23,7 +24,22 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 	}
+	if transport == nil && cfg.TLSInsecureSkipVerify {
+		if existing, ok := httpClient.Transport.(*http.Transport); ok && existing != nil {
+			transport = existing.Clone()
+		} else {
+			transport = http.DefaultTransport.(*http.Transport).Clone()
+		}
+	}
 	if transport != nil {
+		if cfg.TLSInsecureSkipVerify {
+			if transport.TLSClientConfig == nil {
+				transport.TLSClientConfig = &tls.Config{}
+			} else {
+				transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+			}
+			transport.TLSClientConfig.InsecureSkipVerify = true
+		}
 		httpClient.Transport = transport
 	}
 	return httpClient

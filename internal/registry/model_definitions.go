@@ -88,6 +88,24 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetAntigravityModelConfig preserves the legacy map-based access pattern for
+// Antigravity model metadata while using the current upstream model catalog as
+// the single source of truth.
+func GetAntigravityModelConfig() map[string]*ModelInfo {
+	models := GetAntigravityModels()
+	if len(models) == 0 {
+		return nil
+	}
+	config := make(map[string]*ModelInfo, len(models))
+	for _, model := range models {
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		config[model.ID] = cloneModelInfo(model)
+	}
+	return config
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
