@@ -41,6 +41,7 @@ type debugMemorySnapshot struct {
 type debugModelRouteDiagnostic struct {
 	ModelID               string         `json:"model_id"`
 	Providers             []string       `json:"providers"`
+	FromCustomOverlay     bool           `json:"from_custom_overlay"`
 	PresentInOpenAIModels bool           `json:"present_in_openai_models"`
 	OpenAIOwnedBy         string         `json:"openai_owned_by,omitempty"`
 	PresentInClaudeModels bool           `json:"present_in_claude_models"`
@@ -105,6 +106,7 @@ func (s *Server) debugModelRouteMemoryHandler(c *gin.Context) {
 		diagnostics = append(diagnostics, debugModelRouteDiagnostic{
 			ModelID:               modelID,
 			Providers:             providers,
+			FromCustomOverlay:     registry.IsModelFromCustomOverlay(modelID),
 			PresentInOpenAIModels: inOpenAI,
 			OpenAIOwnedBy:         openAIModels[modelID],
 			PresentInClaudeModels: inClaude,
@@ -142,6 +144,7 @@ func (s *Server) debugModelRouteMemoryHandler(c *gin.Context) {
 		},
 		"config": gin.H{
 			"github_copilot_aliases": extractGitHubCopilotAliases(s.cfg),
+			"custom_models":          registry.DebugCustomModelsState(),
 			"oauth_excluded_models":  extractOAuthExcludedModels(s.cfg),
 			"oauth_model_alias":      extractOAuthModelAlias(s.cfg),
 		},

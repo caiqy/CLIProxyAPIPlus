@@ -582,6 +582,9 @@ func main() {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
+				if _, errConfigureCustomModels := configureCustomModelsOverlay(configFilePath); errConfigureCustomModels != nil {
+					log.Warnf("failed to configure custom models overlay: %v", errConfigureCustomModels)
+				}
 				registry.StartModelsUpdater(context.Background())
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
@@ -655,6 +658,9 @@ func main() {
 		} else {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
+			if _, errConfigureCustomModels := configureCustomModelsOverlay(configFilePath); errConfigureCustomModels != nil {
+				log.Warnf("failed to configure custom models overlay: %v", errConfigureCustomModels)
+			}
 			registry.StartModelsUpdater(context.Background())
 
 			if cfg.AuthDir != "" {

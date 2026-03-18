@@ -213,6 +213,18 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 
 func TestDebugModelRouteMemoryEndpoint_NoAuthAndContainsModelDiagnostics(t *testing.T) {
 	server := newTestServer(t)
+	customPath := filepath.Join(filepath.Dir(server.configFilePath), "custom_models.json")
+	if err := os.WriteFile(customPath, []byte(`{
+		"claude": [{"id": "claude-sonnet-4-6", "owned_by": "custom-overlay-owner"}]
+	}`), 0o600); err != nil {
+		t.Fatalf("failed to write custom_models.json: %v", err)
+	}
+	if err := registry.SetCustomModelsPath(customPath); err != nil {
+		t.Fatalf("SetCustomModelsPath() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = registry.SetCustomModelsPath("")
+	})
 
 	server.cfg.OAuthModelAlias = map[string][]proxyconfig.OAuthModelAlias{
 		"github-copilot": {
@@ -245,12 +257,14 @@ func TestDebugModelRouteMemoryEndpoint_NoAuthAndContainsModelDiagnostics(t *test
 		Registry         map[string]any `json:"registry"`
 		Limits           map[string]any `json:"limits"`
 		ModelDiagnostics []struct {
-			ModelID   string         `json:"model_id"`
-			Providers []string       `json:"providers"`
-			Reg       map[string]any `json:"registry"`
+			ModelID           string         `json:"model_id"`
+			Providers         []string       `json:"providers"`
+			Reg               map[string]any `json:"registry"`
+			FromCustomOverlay bool           `json:"from_custom_overlay"`
 		} `json:"model_diagnostics"`
 		Config struct {
 			GitHubCopilotAliases []map[string]any `json:"github_copilot_aliases"`
+			CustomModels         map[string]any   `json:"custom_models"`
 		} `json:"config"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
@@ -290,6 +304,9 @@ func TestDebugModelRouteMemoryEndpoint_NoAuthAndContainsModelDiagnostics(t *test
 			if _, ok := item.Reg["model_id"]; !ok {
 				t.Fatalf("expected registry snapshot to include model_id, got %v", item.Reg)
 			}
+			if !item.FromCustomOverlay {
+				t.Fatal("expected claude-sonnet-4-6 to be marked as from custom overlay")
+			}
 		}
 	}
 	if !foundSonnet {
@@ -298,5 +315,21 @@ func TestDebugModelRouteMemoryEndpoint_NoAuthAndContainsModelDiagnostics(t *test
 
 	if len(payload.Config.GitHubCopilotAliases) == 0 {
 		t.Fatal("expected github_copilot_aliases to be present")
+	}
+	if payload.Config.CustomModels == nil {
+		t.Fatal("expected custom_models diagnostics to be present")
+	}
+	if got := payload.Config.CustomModels["path"]; got != customPath {
+		t.Fatalf("custom_models.path = %v, want %v", got, customPath)
+	}
+	if got := payload.Config.CustomModels["exists"]; got != true {
+		t.Fatalf("custom_models.exists = %v, want true", got)
+	}
+	if got := payload.Config.CustomModels["overlay_enabled"]; got != true {
+		t.Fatalf("custom_models.overlay_enabled = %v, want true", got)
+	}
+	summaries, ok := payload.Config.CustomModels["provider_summaries"].(map[string]any)
+	if !ok || summaries["claude"] == nil {
+		t.Fatalf("custom_models.provider_summaries = %v, want claude entry", payload.Config.CustomModels["provider_summaries"])
 	}
 }

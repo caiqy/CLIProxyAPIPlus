@@ -295,6 +295,38 @@ func (r *ModelRegistry) DebugModelSnapshot(modelID string) map[string]any {
 	}
 }
 
+// DebugCustomModelsState returns safe diagnostics about the current custom model overlay state.
+func DebugCustomModelsState() map[string]any {
+	modelsCatalogStore.mu.RLock()
+	defer modelsCatalogStore.mu.RUnlock()
+
+	providerSummaries := make(map[string]any, len(modelsCatalogStore.customSummaries))
+	for provider, summary := range modelsCatalogStore.customSummaries {
+		providerSummaries[provider] = map[string]any{
+			"overridden": summary.Overridden,
+			"added":      summary.Added,
+		}
+	}
+	return map[string]any{
+		"path":               customModelsPath(),
+		"exists":             modelsCatalogStore.customFileExists,
+		"overlay_enabled":    len(modelsCatalogStore.customModelIDs) > 0,
+		"provider_summaries": providerSummaries,
+	}
+}
+
+// IsModelFromCustomOverlay reports whether the current final catalog entry for modelID comes from custom_models.json.
+func IsModelFromCustomOverlay(modelID string) bool {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return false
+	}
+	modelsCatalogStore.mu.RLock()
+	defer modelsCatalogStore.mu.RUnlock()
+	_, ok := modelsCatalogStore.customModelIDs[modelID]
+	return ok
+}
+
 func hashClientID(clientID string) string {
 	trimmed := strings.TrimSpace(clientID)
 	if trimmed == "" {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -28,8 +29,12 @@ var modelsURLs = []string{
 var embeddedModelsJSON []byte
 
 type modelStore struct {
-	mu   sync.RWMutex
-	data *staticModelsJSON
+	mu               sync.RWMutex
+	base             *staticModelsJSON
+	final            *staticModelsJSON
+	customSummaries  map[string]customOverlaySummary
+	customModelIDs   map[string]struct{}
+	customFileExists bool
 }
 
 var modelsCatalogStore = &modelStore{}
@@ -44,7 +49,26 @@ var (
 	refreshCallbackMu     sync.Mutex
 	refreshCallback       ModelRefreshCallback
 	pendingRefreshChanges []string
+	customModelsPathMu    sync.RWMutex
+	configuredCustomPath  string
+	catalogRebuildMu      sync.Mutex
 )
+
+func customModelsPath() string {
+	customModelsPathMu.RLock()
+	defer customModelsPathMu.RUnlock()
+	return configuredCustomPath
+}
+
+func SetCustomModelsPath(path string) error {
+	catalogRebuildMu.Lock()
+	defer catalogRebuildMu.Unlock()
+	customModelsPathMu.Lock()
+	configuredCustomPath = strings.TrimSpace(path)
+	customModelsPathMu.Unlock()
+	_, err := reloadFinalCatalogFromCurrentBaseLocked("set custom models path")
+	return err
+}
 
 // SetModelRefreshCallback registers a callback that is invoked when startup or
 // periodic model refresh detects changes. Only one callback is supported;
@@ -113,29 +137,105 @@ func tryStartupRefresh(ctx context.Context) {
 }
 
 func tryRefreshModels(ctx context.Context, label string) {
-	oldData := getModels()
+	catalogRebuildMu.Lock()
+	defer catalogRebuildMu.Unlock()
 
 	parsed, url := fetchModelsFromRemote(ctx)
-	if parsed == nil {
-		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
+	if parsed != nil {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.base = cloneStaticModels(parsed)
+		modelsCatalogStore.mu.Unlock()
+	} else {
+		log.Warnf("%s: fetch failed from all URLs, keeping current base catalog", label)
+	}
+
+	changed, err := reloadFinalCatalogFromCurrentBaseLocked(label)
+	if err != nil {
+		log.Warnf("%s: failed to rebuild final catalog: %v", label, err)
 		return
 	}
 
-	// Detect changes before updating store.
-	changed := detectChangedProviders(oldData, parsed)
-
-	// Update store with new data regardless.
-	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = parsed
-	modelsCatalogStore.mu.Unlock()
-
 	if len(changed) == 0 {
+		if url == "" {
+			log.Infof("%s completed using current base catalog, no changes detected", label)
+			return
+		}
 		log.Infof("%s completed from %s, no changes detected", label, url)
 		return
 	}
 
+	if url == "" {
+		log.Infof("%s completed using current base catalog, changes detected for providers: %v", label, changed)
+		notifyModelRefresh(changed)
+		return
+	}
 	log.Infof("%s completed from %s, changes detected for providers: %v", label, url, changed)
 	notifyModelRefresh(changed)
+}
+
+func reloadFinalCatalogFromCurrentBase(reason string) ([]string, error) {
+	catalogRebuildMu.Lock()
+	defer catalogRebuildMu.Unlock()
+	return reloadFinalCatalogFromCurrentBaseLocked(reason)
+}
+
+func reloadFinalCatalogFromCurrentBaseLocked(reason string) ([]string, error) {
+	modelsCatalogStore.mu.RLock()
+	oldFinal := cloneStaticModels(modelsCatalogStore.final)
+	base := cloneStaticModels(modelsCatalogStore.base)
+	modelsCatalogStore.mu.RUnlock()
+
+	path := customModelsPath()
+	customCatalog, err := parseCustomModelsFile(path)
+	if err != nil {
+		return nil, err
+	}
+	newFinal, summaries := overlayModels(base, customCatalog)
+	customIDs := collectCustomModelIDs(customCatalog)
+	customExists := false
+	if strings.TrimSpace(path) != "" {
+		if _, statErr := os.Stat(path); statErr == nil {
+			customExists = true
+		}
+	}
+
+	modelsCatalogStore.mu.Lock()
+	modelsCatalogStore.final = newFinal
+	modelsCatalogStore.customSummaries = summaries
+	modelsCatalogStore.customModelIDs = customIDs
+	modelsCatalogStore.customFileExists = customExists
+	modelsCatalogStore.mu.Unlock()
+
+	logCustomOverlaySummary(reason, summaries)
+	return detectChangedProviders(oldFinal, newFinal), nil
+}
+
+func logCustomOverlaySummary(reason string, summaries map[string]customOverlaySummary) {
+	if len(summaries) == 0 {
+		return
+	}
+	for provider, summary := range summaries {
+		log.Infof("%s: custom models overlay applied: provider=%s overridden=%d added=%d", reason, provider, summary.Overridden, summary.Added)
+	}
+}
+
+func collectCustomModelIDs(custom *staticModelsJSON) map[string]struct{} {
+	if custom == nil {
+		return nil
+	}
+	ids := make(map[string]struct{})
+	for _, spec := range staticModelSectionSpecs {
+		for _, model := range spec.get(custom) {
+			if model == nil || strings.TrimSpace(model.ID) == "" {
+				continue
+			}
+			ids[model.ID] = struct{}{}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return ids
 }
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
@@ -305,16 +405,23 @@ func loadModelsFromBytes(data []byte, source string) error {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)
 	}
 
+	catalogRebuildMu.Lock()
+	defer catalogRebuildMu.Unlock()
+
 	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = &parsed
+	modelsCatalogStore.base = cloneStaticModels(&parsed)
 	modelsCatalogStore.mu.Unlock()
-	return nil
+	_, err := reloadFinalCatalogFromCurrentBaseLocked(source)
+	return err
 }
 
 func getModels() *staticModelsJSON {
 	modelsCatalogStore.mu.RLock()
 	defer modelsCatalogStore.mu.RUnlock()
-	return modelsCatalogStore.data
+	if modelsCatalogStore.final == nil {
+		return &staticModelsJSON{}
+	}
+	return modelsCatalogStore.final
 }
 
 func validateModelsCatalog(data *staticModelsJSON) error {
